@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "paths": [
+    { "id": "pi-openrouter", "machine": "local", "subscription": "openrouter", "accountRef": null, "harness": "pi", "provider": "openrouter", "catalog": "pi", "quotaPath": "openrouter", "constraints": ["metered-billing"] },
+    { "id": "native-codex", "machine": "local", "subscription": "codex", "accountRef": null, "harness": "codex", "provider": "openai-codex", "catalog": "native", "quotaPath": "codex", "constraints": ["native-model-catalog-unobserved", "shared-subscription-capacity"] }
+  ]
+}

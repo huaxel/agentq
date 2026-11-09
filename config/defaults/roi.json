@@ -1,0 +1,44 @@
+{
+  "lambdaCostAversion": 0.3,
+  "costBlend": {
+    "cache": 0.9174,
+    "input": 0.0781,
+    "output": 0.044
+  },
+  "tierThresholds": {
+    "frontier": 0.8,
+    "high": 0.6,
+    "mid": 0.4
+  },
+  "partitionMap": {
+    "agents": {
+      "gdpval": 0.25,
+      "tau3Banking": 0.4,
+      "apexAgents": 0.35
+    },
+    "coding": {
+      "terminalBench": 0.667,
+      "sciCode": 0.333
+    },
+    "general": {
+      "aaLcr": 0.333,
+      "aaOmni": 0.667
+    },
+    "scientific": {
+      "hle": 0.5,
+      "gpqa": 0.25,
+      "critPt": 0.25
+    }
+  },
+  "reconWeights": {
+    "gdpval": 0.2,
+    "tau3Banking": 0.14,
+    "terminalBench": 0.16,
+    "sciCode": 0.08,
+    "aaLcr": 0.06,
+    "aaOmni": 0.12,
+    "hle": 0.12,
+    "gpqa": 0.06,
+    "critPt": 0.06
+  }
+}

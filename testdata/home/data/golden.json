@@ -1,0 +1,142 @@
+{
+  "score": [
+    {
+      "model": "acme/atlas-large",
+      "capTax": 1,
+      "capHobby": 1,
+      "valTax": 0.7,
+      "valHobby": 0.7,
+      "minCost": 3.261456,
+      "bestPath": "Atlas Max",
+      "tierTax": "Frontier"
+    },
+    {
+      "model": "acme/atlas-flash",
+      "capTax": 0.6694014790565673,
+      "capHobby": 0.6671162887030756,
+      "valTax": 0.6580343176967857,
+      "valHobby": 0.6557491273432939,
+      "minCost": 0.05646299999999999,
+      "bestPath": "Orbit Go",
+      "tierTax": "High"
+    },
+    {
+      "model": "acme/atlas-mini",
+      "capTax": 0.42350247225511783,
+      "capHobby": 0.43353612426225363,
+      "valTax": 0.4204574371019065,
+      "valHobby": 0.43049108910904227,
+      "minCost": 0.014822499999999997,
+      "bestPath": "Orbit Go",
+      "tierTax": "Mid"
+    },
+    {
+      "model": "orbit/o-pro",
+      "capTax": 0.8868322535227527,
+      "capHobby": 0.8884280553207524,
+      "valTax": 0.6545444259193823,
+      "valHobby": 0.656140227717382,
+      "minCost": 2.07229,
+      "bestPath": "OpenRouter",
+      "tierTax": "Frontier"
+    },
+    {
+      "model": "orbit/o-mini",
+      "capTax": 0.5395522040335874,
+      "capHobby": 0.5412718925560689,
+      "valTax": 0.5314026307234818,
+      "valHobby": 0.5331223192459633,
+      "minCost": 0.04016466666666666,
+      "bestPath": "Orbit Go",
+      "tierTax": "Mid"
+    },
+    {
+      "model": "nimbus/nimbus-coder",
+      "capTax": 0.4853847992589174,
+      "capHobby": 0.5538867541674326,
+      "valTax": 0.4502027436981732,
+      "valHobby": 0.5187046986066884,
+      "minCost": 0.18530600000000003,
+      "bestPath": "Acme Codex",
+      "tierTax": "Mid"
+    },
+    {
+      "model": "nimbus/nimbus-free",
+      "capTax": 0.1829910600391475,
+      "capHobby": 0.22308026566640143,
+      "valTax": 0.1829910600391475,
+      "valHobby": 0.22308026566640143,
+      "minCost": 0,
+      "bestPath": "OpenRouter",
+      "tierTax": "Low"
+    },
+    {
+      "model": "local/tiny-7b",
+      "capTax": null,
+      "capHobby": null,
+      "valTax": null,
+      "valHobby": null,
+      "minCost": 0,
+      "bestPath": "Local box",
+      "tierTax": null
+    }
+  ],
+  "values": [
+    {
+      "model": "acme/atlas-large",
+      "mtok": 3.261456,
+      "cost": 1,
+      "perf": 1,
+      "aver": 1
+    },
+    {
+      "model": "acme/atlas-flash",
+      "mtok": 0.33877799999999997,
+      "cost": 0.1038732394366197,
+      "perf": 0.6937784984206466,
+      "aver": 0.6937784984206466
+    },
+    {
+      "model": "acme/atlas-mini",
+      "mtok": 0.08893499999999999,
+      "cost": 0.0272684960336733,
+      "perf": 0.5024653253029183,
+      "aver": 0.5024653253029183
+    },
+    {
+      "model": "orbit/o-pro",
+      "mtok": 2.07229,
+      "cost": 0.6353879984890185,
+      "perf": 0.8943022073487245,
+      "aver": 0.8943022073487245
+    },
+    {
+      "model": "orbit/o-mini",
+      "mtok": 0.24098799999999998,
+      "cost": 0.0738896983433166,
+      "perf": 0.5911482348335597,
+      "aver": 0.5911482348335597
+    },
+    {
+      "model": "nimbus/nimbus-coder",
+      "mtok": 0.18530600000000003,
+      "cost": 0.05681695537207923,
+      "perf": 0.5790464910772943,
+      "aver": 0.5790464910772943
+    },
+    {
+      "model": "nimbus/nimbus-free",
+      "mtok": 0,
+      "cost": 0,
+      "perf": 0.3402380138280758,
+      "aver": 0.3402380138280758
+    },
+    {
+      "model": "local/tiny-7b",
+      "mtok": 0,
+      "cost": 0,
+      "perf": 0.10851248665282337,
+      "aver": 0.10851248665282337
+    }
+  ]
+}

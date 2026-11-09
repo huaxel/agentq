@@ -1,0 +1,26 @@
+# Local dashboard viewer. Usage bundles are collected by the host and mounted
+# read/write with the generated dashboard. The service binds only to loopback;
+# use `tailscale serve --bg 8088` when tailnet access is wanted.
+#
+# Set REFRESH_TOKEN before exposing the viewer through any reverse proxy. It
+# protects refresh and benchmark mutations; read-only dashboard access remains
+# intentionally unauthenticated.
+services:
+  dashboard:
+    build: .
+    container_name: sub-roi-dashboard
+    ports:
+      - "127.0.0.1:8088:8088"
+    volumes:
+      # User setup, usage, quota, and generated dashboard all live here.
+      - ${AGENTQ_HOME:?Set AGENTQ_HOME to your configured agentq home}:/agentq-home
+      - ./docs:/app/docs
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    environment:
+      PORT: "8088"
+      HOST: "0.0.0.0"
+      REFRESH_MINUTES: "30"
+      GIT_PULL: "0"
+      REFRESH_TOKEN: "${REFRESH_TOKEN:-}"
+      AGENTQ_HOME: /agentq-home
+    restart: unless-stopped

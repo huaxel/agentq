@@ -1,0 +1,76 @@
+{
+  "profiles": {
+    "tax": {
+      "agents": 0.3,
+      "coding": 0.3,
+      "general": 0.25,
+      "scientific": 0.15
+    },
+    "hobby": {
+      "agents": 0.2,
+      "coding": 0.45,
+      "general": 0.25,
+      "scientific": 0.1
+    }
+  },
+  "priceOverrides": {
+    "accounts/example/routers/example-mini": {
+      "input": 0.5,
+      "output": 2.0,
+      "cache": 0.05
+    }
+  },
+  "providerPathMap": {
+    "claude": "claudemax",
+    "codex": "codex",
+    "opencode": "go",
+    "openrouter": "openrouter",
+    "example-vendor": "examplepass"
+  },
+  "agentPathMap": {
+    "claude": "claudemax",
+    "codex": "codex",
+    "pi": "openrouter"
+  },
+  "modelPathPatterns": {
+    "pi": [
+      { "match": "openrouter/", "path": "openrouter" },
+      { "match": "gpt-", "path": "codex" }
+    ]
+  },
+  "modelPriceAliases": {
+    "example-mini-latest": "example-mini",
+    "example-large-2026": "example-large"
+  },
+  "paths": [
+    {
+      "id": "claudemax",
+      "name": "Claude Max",
+      "type": "Wallet",
+      "fee": 200,
+      "allowance": null,
+      "models": ["claude-sonnet-5-5", "claude-opus-5-1"],
+      "startDate": "20260101",
+      "costModels": ["claude-"]
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "type": "Wallet",
+      "fee": 20,
+      "allowance": null,
+      "models": ["example-codex"],
+      "startDate": "20260101"
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "type": "Metered",
+      "fee": 0,
+      "allowance": null,
+      "models": ["*"]
+    }
+  ],
+  "clientPrecedence": ["claudemax"],
+  "unscorableModels": ["free", "default", "auto", "unknown"]
+}

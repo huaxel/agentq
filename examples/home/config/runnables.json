@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "runnables": [
+    { "id": "claude/example-sonnet", "path": "claudemax", "modelKey": null, "harness": "claude" },
+    { "id": "openai-codex/example-codex", "path": "codex", "modelKey": "example-codex", "harness": "pi" },
+    { "id": "openrouter/example-mini", "path": "openrouter", "modelKey": "example-mini", "harness": "pi" }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"style": {
+				"useNodejsImportProtocol": "off",
+				"useTemplate": "off",
+				"useExponentiationOperator": "off",
+				"noNonNullAssertion": "off"
+			},
+			"suspicious": {
+				"noRedundantUseStrict": "off",
+				"noAssignInExpressions": "off",
+				"noGlobalIsFinite": "off",
+				"noExplicitAny": "off",
+				"useIterableCallbackReturn": "off"
+			},
+			"complexity": {
+				"useOptionalChain": "off",
+				"noUselessContinue": "off"
+			},
+			"correctness": {
+				"noUnusedVariables": "off",
+				"noUnusedFunctionParameters": "off"
+			}
+		}
+	},
+	"formatter": {
+		"enabled": false
+	},
+	"assist": {
+		"enabled": false
+	}
+}

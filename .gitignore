@@ -1,0 +1,32 @@
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Local credentials and certificates
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Stray logs and crash dumps (e.g. osxphotos_crash.log) — never track these.
+*.log
+
+# User data and generated outputs are local to AGENTQ_HOME.
+/data/
+.pi/
+
+# --- Regenerated locally (DON'T track) ---
+# Optional spreadsheet editing bridge — benchmark JSON is the source of truth.
+ModelBenchmark_v4.xlsx
+xls/
+docs/roi-dashboard.html
+
+# Local Git worktrees are machine-specific and contain embedded repositories.
+.worktrees/
+
+# Throwaway test files
+jules_test.txt
+tokscale-export-*.json

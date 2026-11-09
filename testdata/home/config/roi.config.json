@@ -1,0 +1,94 @@
+{
+  "profiles": {
+    "tax": {
+      "agents": 0.32,
+      "coding": 0.26,
+      "general": 0.3,
+      "scientific": 0.12
+    },
+    "hobby": {
+      "agents": 0.35,
+      "coding": 0.4,
+      "general": 0.15,
+      "scientific": 0.1
+    }
+  },
+  "paths": [
+    {
+      "id": "local",
+      "name": "Local box",
+      "type": "Local",
+      "fee": 0,
+      "allowance": null,
+      "models": ["tiny-7b"]
+    },
+    {
+      "id": "go",
+      "name": "Orbit Go",
+      "type": "Wallet",
+      "fee": 10,
+      "allowance": null,
+      "models": ["atlas-flash", "atlas-mini", "o-mini"],
+      "startDate": "20260601"
+    },
+    {
+      "id": "codex",
+      "name": "Acme Codex",
+      "type": "Wallet",
+      "fee": 20,
+      "allowance": null,
+      "models": ["atlas-flash", "nimbus-coder"],
+      "startDate": "20260601"
+    },
+    {
+      "id": "claudemax",
+      "name": "Atlas Max",
+      "type": "Wallet",
+      "fee": 100,
+      "allowance": null,
+      "models": ["atlas-large"],
+      "startDate": "20260601",
+      "costModels": ["atlas-"]
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "type": "Metered",
+      "fee": 0,
+      "allowance": null,
+      "models": ["atlas-large", "atlas-flash", "atlas-mini", "o-pro", "o-mini", "nimbus"]
+    }
+  ],
+  "providerPathMap": {
+    "acme": "claudemax",
+    "acme-codex": "codex",
+    "orbit": "openrouter",
+    "orbit-go": "go",
+    "nimbus": "codex",
+    "local": "local"
+  },
+  "agentPathMap": {
+    "claude": "claudemax",
+    "codex": "codex",
+    "pi": "openrouter"
+  },
+  "modelPathPatterns": {
+    "pi": [
+      { "match": "openrouter/", "path": "openrouter" },
+      { "match": "atlas-", "path": "claudemax" }
+    ]
+  },
+  "modelPriceAliases": {
+    "atlas-large-latest": "atlas-large",
+    "o-mini-2026": "o-mini"
+  },
+  "priceOverrides": {
+    "accounts/example/routers/example-mini": {
+      "input": 0.5,
+      "output": 2,
+      "cache": 0.05
+    }
+  },
+  "unscorableModels": ["free", "default", "auto", "unknown"],
+  "clientPrecedence": ["claudemax"]
+}

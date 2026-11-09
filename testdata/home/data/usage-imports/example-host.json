@@ -1,0 +1,69 @@
+{
+  "usageSchemaVersion": 1,
+  "hostname": "example-host",
+  "generatedAt": "2026-06-30T18:00:00.000Z",
+  "since": "20260601",
+  "valueRun": {
+    "claudemax": 18.2,
+    "openrouter": 7.75,
+    "codex": 12.4
+  },
+  "usageByModel": {
+    "atlas-large": {
+      "model": "acme/atlas-large",
+      "providers": ["acme"],
+      "cost": 18.2,
+      "tokens": 4200000,
+      "inputTokens": 320000,
+      "outputTokens": 88000,
+      "cacheReadTokens": 3792000,
+      "cacheWriteTokens": 0,
+      "messageCount": 214
+    },
+    "atlas-flash": {
+      "model": "acme/atlas-flash",
+      "providers": ["orbit", "orbit-go"],
+      "cost": 7.75,
+      "tokens": 12000000,
+      "inputTokens": 600000,
+      "outputTokens": 240000,
+      "cacheReadTokens": 11160000,
+      "cacheWriteTokens": 0,
+      "messageCount": 862
+    },
+    "nimbus-coder": {
+      "model": "nimbus/nimbus-coder",
+      "providers": ["nimbus"],
+      "cost": 12.4,
+      "tokens": 3600000,
+      "inputTokens": 280000,
+      "outputTokens": 120000,
+      "cacheReadTokens": 3200000,
+      "cacheWriteTokens": 0,
+      "messageCount": 341
+    }
+  },
+  "usageRecords": [
+    { "date": "2026-06-02", "model": "atlas-large", "agent": "claude", "inputTokens": 110000, "outputTokens": 30000, "cacheReadTokens": 1264000, "cacheWriteTokens": 0, "cost": 6.1 },
+    { "date": "2026-06-02", "model": "atlas-flash", "agent": "pi", "inputTokens": 200000, "outputTokens": 80000, "cacheReadTokens": 3720000, "cacheWriteTokens": 0, "cost": 2.55 },
+    { "date": "2026-06-02", "model": "nimbus-coder", "agent": "codex", "inputTokens": 95000, "outputTokens": 40000, "cacheReadTokens": 1065000, "cacheWriteTokens": 0, "cost": 4.1 },
+    { "date": "2026-06-09", "model": "atlas-large", "agent": "claude", "inputTokens": 105000, "outputTokens": 29000, "cacheReadTokens": 1266000, "cacheWriteTokens": 0, "cost": 5.9 },
+    { "date": "2026-06-09", "model": "atlas-flash", "agent": "pi", "inputTokens": 200000, "outputTokens": 80000, "cacheReadTokens": 3720000, "cacheWriteTokens": 0, "cost": 2.6 },
+    { "date": "2026-06-09", "model": "nimbus-coder", "agent": "codex", "inputTokens": 92500, "outputTokens": 40000, "cacheReadTokens": 1067500, "cacheWriteTokens": 0, "cost": 4.2 },
+    { "date": "2026-06-16", "model": "atlas-large", "agent": "claude", "inputTokens": 105000, "outputTokens": 29000, "cacheReadTokens": 1262000, "cacheWriteTokens": 0, "cost": 6.2 },
+    { "date": "2026-06-16", "model": "atlas-flash", "agent": "pi", "inputTokens": 200000, "outputTokens": 80000, "cacheReadTokens": 3720000, "cacheWriteTokens": 0, "cost": 2.6 },
+    { "date": "2026-06-16", "model": "nimbus-coder", "agent": "codex", "inputTokens": 92500, "outputTokens": 40000, "cacheReadTokens": 1067500, "cacheWriteTokens": 0, "cost": 4.1 }
+  ],
+  "providerUsageRecords": [
+    { "date": "2026-06-02", "pathId": "claudemax", "origin": "tokscale", "provider": "acme", "model": "acme/atlas-large", "cost": 6.1, "tokens": 1404000, "inputTokens": 110000, "outputTokens": 30000, "cacheReadTokens": 1264000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-02", "pathId": "openrouter", "origin": "tokscale", "provider": "orbit", "model": "acme/atlas-flash", "cost": 2.55, "tokens": 4000000, "inputTokens": 200000, "outputTokens": 80000, "cacheReadTokens": 3720000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-02", "pathId": "codex", "origin": "tokscale", "provider": "nimbus", "model": "nimbus/nimbus-coder", "cost": 4.1, "tokens": 1200000, "inputTokens": 95000, "outputTokens": 40000, "cacheReadTokens": 1065000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-09", "pathId": "claudemax", "origin": "tokscale", "provider": "acme", "model": "acme/atlas-large", "cost": 5.9, "tokens": 1400000, "inputTokens": 105000, "outputTokens": 29000, "cacheReadTokens": 1266000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-09", "pathId": "openrouter", "origin": "tokscale", "provider": "orbit", "model": "acme/atlas-flash", "cost": 2.6, "tokens": 4000000, "inputTokens": 200000, "outputTokens": 80000, "cacheReadTokens": 3720000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-09", "pathId": "codex", "origin": "tokscale", "provider": "nimbus", "model": "nimbus/nimbus-coder", "cost": 4.2, "tokens": 1200000, "inputTokens": 92500, "outputTokens": 40000, "cacheReadTokens": 1067500, "cacheWriteTokens": 0 },
+    { "date": "2026-06-16", "pathId": "claudemax", "origin": "tokscale", "provider": "acme", "model": "acme/atlas-large", "cost": 6.2, "tokens": 1396000, "inputTokens": 105000, "outputTokens": 29000, "cacheReadTokens": 1262000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-16", "pathId": "openrouter", "origin": "tokscale", "provider": "orbit", "model": "acme/atlas-flash", "cost": 2.6, "tokens": 4000000, "inputTokens": 200000, "outputTokens": 80000, "cacheReadTokens": 3720000, "cacheWriteTokens": 0 },
+    { "date": "2026-06-16", "pathId": "codex", "origin": "tokscale", "provider": "nimbus", "model": "nimbus/nimbus-coder", "cost": 4.1, "tokens": 1200000, "inputTokens": 92500, "outputTokens": 40000, "cacheReadTokens": 1067500, "cacheWriteTokens": 0 }
+  ],
+  "providerUsageSource": "tokscale"
+}

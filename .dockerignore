@@ -1,0 +1,29 @@
+.git
+node_modules
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# User home data is supplied via AGENTQ_HOME at runtime.
+data/
+
+# Keep only the tracked method defaults from config/.
+config/*
+!config/defaults/
+!config/defaults/**
+
+# generated outputs (rebuilt at runtime)
+docs/
+
+# dev/test stuff — not needed in the container
+test/
+scripts/
+/tmp
+*.md
+justfile
+pi-issue.sh
+*.xlsx
+osxphotos_crash.log
+jules_test.txt

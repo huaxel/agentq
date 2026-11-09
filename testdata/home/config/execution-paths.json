@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "paths": [
+    {
+      "id": "pi-openrouter",
+      "machine": "local",
+      "subscription": "openrouter",
+      "accountRef": null,
+      "harness": "pi",
+      "provider": "openrouter",
+      "catalog": "pi",
+      "quotaPath": "openrouter",
+      "constraints": ["metered-billing"]
+    },
+    {
+      "id": "pi-go",
+      "machine": "local",
+      "subscription": "go",
+      "accountRef": null,
+      "harness": "pi",
+      "provider": "orbit-go",
+      "catalog": "pi",
+      "quotaPath": "go",
+      "constraints": ["coding-agent-traffic"]
+    },
+    {
+      "id": "native-codex",
+      "machine": "local",
+      "subscription": "codex",
+      "accountRef": null,
+      "harness": "codex",
+      "provider": "acme-codex",
+      "catalog": "native",
+      "quotaPath": "codex",
+      "constraints": ["native-model-catalog-unobserved", "shared-subscription-capacity"]
+    }
+  ]
+}

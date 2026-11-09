@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "runnables": [
+    { "id": "acme/atlas-large", "path": "claudemax", "modelKey": "atlas-large", "harness": "claude" },
+    { "id": "acme/atlas-flash", "path": "codex", "modelKey": "atlas-flash", "harness": "pi" },
+    { "id": "opencode-go/atlas-flash", "path": "go", "modelKey": "atlas-flash", "harness": "pi" },
+    { "id": "opencode-go/atlas-mini", "path": "go", "modelKey": "atlas-mini", "harness": "pi" },
+    { "id": "opencode-go/o-mini", "path": "go", "modelKey": "o-mini", "harness": "pi" },
+    { "id": "openrouter/o-pro", "path": "openrouter", "modelKey": "o-pro", "harness": "pi" },
+    { "id": "openrouter/nimbus-free", "path": "openrouter", "modelKey": null, "harness": "pi" },
+    { "id": "local/tiny-7b", "path": "local", "modelKey": "tiny-7b", "harness": "pi" }
+  ]
+}
