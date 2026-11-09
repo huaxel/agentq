@@ -7,7 +7,11 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { capacityFor, readCapacity } = require('../src/core/capacity.js');
+const { capacityFor, readCapacity, windowDurationMs } = require('../src/core/capacity.js');
+
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
 const NOW = Date.parse('2026-11-08T12:00:00Z');
 const FRESH = new Date(NOW - 60_000).toISOString();
@@ -24,15 +28,33 @@ test('a fresh window reports headroom, reset time, and observation time', () => 
     { now: NOW },
   );
   const entry = capacity.get('codex');
-  assert.deepEqual(entry, {
-    path: 'codex',
-    state: 'available',
-    headroomPct: 80,
-    resetsAt: FUTURE,
-    observedAt: FRESH,
-    stale: false,
-    reason: null,
-  });
+  assert.deepEqual(
+    {
+      path: entry.path,
+      state: entry.state,
+      headroomPct: entry.headroomPct,
+      resetsAt: entry.resetsAt,
+      observedAt: entry.observedAt,
+      stale: entry.stale,
+      reason: entry.reason,
+    },
+    {
+      path: 'codex',
+      state: 'available',
+      headroomPct: 80,
+      resetsAt: FUTURE,
+      observedAt: FRESH,
+      stale: false,
+      reason: null,
+    },
+  );
+  // 1h into a 7d window: nearly the whole window has elapsed, so 20% used
+  // projects to about 20% at the reset — behind pace, pressure clamped low.
+  assert.equal(entry.pace.window, 'weekly');
+  assert.equal(entry.pace.usedPct, 20);
+  assert.ok(entry.pace.elapsedPct > 99 && entry.pace.elapsedPct <= 100);
+  assert.equal(entry.pace.state, 'behind');
+  assert.equal(entry.quotaPressure, 0.25);
 });
 
 test('path headroom is the best window, so one full window does not saturate', () => {
@@ -187,6 +209,143 @@ test('a missing path is unknown with no quota data', () => {
     observedAt: null,
     stale: true,
     reason: 'no quota data',
+    pace: null,
+    quotaPressure: null,
   });
   assert.equal(capacityFor(null, 'local').state, 'unknown');
+});
+
+/* ───── quota pace ───── */
+
+/** A window at `elapsedPct` through `durationMs`, resetting in the remainder. */
+function windowAt(label, durationMs, elapsedPct, usedPercent, extra = {}) {
+  const remaining = durationMs * (1 - elapsedPct / 100);
+  return {
+    label,
+    usedPercent,
+    resetsAt: new Date(NOW + remaining).toISOString(),
+    ...extra,
+  };
+}
+
+function paceOf(windows) {
+  return readCapacity(snapshot({ codex: { updatedAt: FRESH, windows } }), { now: NOW }).get('codex');
+}
+
+test('window duration parses every label form', () => {
+  const cases = [
+    [{ label: '5h' }, 5 * HOUR],
+    [{ label: '5-hour' }, 5 * HOUR],
+    [{ label: '5-hour (gosingle)' }, 5 * HOUR],
+    [{ label: '30m' }, 30 * MINUTE],
+    [{ label: '10d' }, 10 * DAY],
+    [{ label: 'daily' }, DAY],
+    [{ label: 'day' }, DAY],
+    [{ label: '24h' }, DAY],
+    [{ label: 'weekly' }, 7 * DAY],
+    [{ label: 'week' }, 7 * DAY],
+    [{ label: '7d' }, 7 * DAY],
+    [{ label: 'WEEKLY' }, 7 * DAY],
+  ];
+  for (const [window, expected] of cases) {
+    assert.equal(windowDurationMs(window), expected, `label ${window.label}`);
+  }
+});
+
+test('a month is the calendar month before its reset, in UTC', () => {
+  const marchFirst = { label: 'monthly', resetsAt: '2026-03-01T00:00:00Z' };
+  assert.equal(windowDurationMs(marchFirst), 28 * DAY, 'February 2026 has 28 days');
+  assert.equal(
+    windowDurationMs({ label: 'month', resetsAt: '2026-03-01T00:00:00Z' }),
+    28 * DAY,
+  );
+});
+
+test('windowMinutes wins over the label, and a parenthetical is ignored', () => {
+  assert.equal(windowDurationMs({ label: 'weekly', windowMinutes: 60 }), HOUR);
+  assert.equal(windowDurationMs({ label: '5-hour (gosingle)' }), 5 * HOUR);
+  assert.equal(windowDurationMs({ label: 'total', windowMinutes: 90 }), 90 * MINUTE);
+});
+
+test('a label that describes no duration gives none', () => {
+  for (const label of ['requests', 'concurrency', 'total', '', undefined]) {
+    assert.equal(windowDurationMs({ label }), null, `label ${String(label)}`);
+  }
+  assert.equal(windowDurationMs(null), null);
+});
+
+test('a projection needs at least 5% of the window elapsed', () => {
+  const early = paceOf([windowAt('5h', 5 * HOUR, 4, 1)]);
+  assert.equal(early.pace, null);
+  assert.equal(early.quotaPressure, null);
+
+  const atThreshold = paceOf([windowAt('5h', 5 * HOUR, 5, 1)]);
+  assert.ok(atThreshold.pace !== null);
+  assert.equal(atThreshold.pace.elapsedPct, 5);
+  assert.equal(atThreshold.pace.projectedPct, 20);
+});
+
+test('pace state is behind below 80, on at 80 and 110, ahead above 110', () => {
+  const at = (usedPercent) => paceOf([windowAt('5h', 5 * HOUR, 50, usedPercent)]).pace;
+  assert.equal(at(39.9).state, 'behind');
+  assert.equal(at(39.9).projectedPct, 79.8);
+  assert.equal(at(40).projectedPct, 80);
+  assert.equal(at(40).state, 'on');
+  assert.equal(at(55).projectedPct, 110);
+  assert.equal(at(55).state, 'on');
+  assert.equal(at(55.1).state, 'ahead');
+});
+
+test('the binding window is the highest projection, not the earliest reset', () => {
+  const entry = paceOf([
+    windowAt('5h', 5 * HOUR, 50, 15), // projected 30
+    windowAt('weekly', 7 * DAY, 50, 60), // projected 120, later reset
+  ]);
+  assert.equal(entry.pace.window, 'weekly');
+  assert.equal(entry.pace.projectedPct, 120);
+  assert.equal(entry.pace.state, 'ahead');
+  assert.equal(entry.quotaPressure, 1.2);
+});
+
+test('a projection tie goes to the earlier reset', () => {
+  const entry = paceOf([
+    windowAt('weekly', 7 * DAY, 50, 30), // projected 60, later reset
+    windowAt('5h', 5 * HOUR, 50, 30), // projected 60, earlier reset
+  ]);
+  assert.equal(entry.pace.window, '5h');
+});
+
+test('a window that already reset contributes no pace', () => {
+  const reset = { label: 'weekly', usedPercent: 0, resetsAt: new Date(NOW - HOUR).toISOString() };
+  const onlyReset = paceOf([reset]);
+  assert.equal(onlyReset.pace, null);
+  assert.equal(onlyReset.quotaPressure, null);
+
+  const future = windowAt('5h', 5 * HOUR, 50, 20);
+  const mixed = paceOf([reset, future]);
+  assert.equal(mixed.pace.window, '5h');
+  assert.equal(mixed.pace.projectedPct, 40);
+});
+
+test('quotaPressure is clamped to [0.25, 4]', () => {
+  assert.equal(paceOf([windowAt('5h', 5 * HOUR, 50, 5)]).quotaPressure, 0.25);
+  assert.equal(paceOf([windowAt('5h', 5 * HOUR, 50, 250)]).quotaPressure, 4);
+});
+
+test('property: elapsedPct stays in [0, 100] and pressure in [0.25, 4] or null', () => {
+  const durations = [5 * HOUR, DAY, 7 * DAY, 30 * DAY];
+  const labels = ['5h', 'daily', 'weekly', '30d'];
+  for (let i = 0; i < durations.length; i += 1) {
+    for (const elapsedPct of [0, 1, 4.9, 5, 25, 50, 99.9, 100]) {
+      for (const usedPercent of [0, 1, 50, 100, 250]) {
+        const entry = paceOf([windowAt(labels[i], durations[i], elapsedPct, usedPercent)]);
+        if (entry.pace === null) {
+          assert.equal(entry.quotaPressure, null);
+          continue;
+        }
+        assert.ok(entry.pace.elapsedPct >= 0 && entry.pace.elapsedPct <= 100);
+        assert.ok(entry.quotaPressure >= 0.25 && entry.quotaPressure <= 4);
+      }
+    }
+  }
 });

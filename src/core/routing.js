@@ -6,7 +6,9 @@
  *
  * Order is cheapest-first, then use-it-before-it-resets, then most intelligent,
  * then id. Cost leads because a saturated path costs nothing to skip while an
- * unused window is wasted capacity.
+ * unused window is wasted capacity. "Cheapest" means pace-adjusted cost
+ * (`effectiveCostPerMTok`): quota behind pace is cheap because it would reset
+ * unused, quota ahead of pace is dear because spending it displaces later work.
  *
  * An intelligence ESTIMATE (src/core/aa-estimate.js) is eligible exactly like a
  * real score — the tier floor applies to the estimated value — but every reason
@@ -24,7 +26,7 @@ const { shortlist } = require('./shortlist.js');
  */
 const TIER_FLOORS = { small: 30, medium: 38, big: 45 };
 
-const ORDER = ['costPerMTok asc', 'resetsAt asc', 'intelligence desc', 'id asc'];
+const ORDER = ['effectiveCostPerMTok asc', 'resetsAt asc', 'intelligence desc', 'id asc'];
 
 /** Prefix of the routing reason a degraded (but still eligible) choice carries. */
 const DEGRADED_REASON_PREFIX = 'path degraded: ';
@@ -39,6 +41,9 @@ const DEGRADED_REASON_PREFIX = 'path degraded: ';
  * @property {{ n: number, r: number, rmse: number }|null} calibration
  * @property {number|null} costPerMTok
  * @property {'roi'|'aa-price'|null} costSource
+ * @property {import('./capacity.js').QuotaPace|null} pace
+ * @property {number|null} quotaPressure
+ * @property {number|null} effectiveCostPerMTok costPerMTok × quotaPressure, or costPerMTok
  * @property {string} capacityState
  * @property {number|null} headroomPct
  * @property {string|null} resetsAt
@@ -53,6 +58,36 @@ const DEGRADED_REASON_PREFIX = 'path degraded: ';
  */
 function numericOrNull(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Cost adjusted by quota pace: cheap quota behind pace is cheaper than its
+ * list price, scarce quota ahead of pace is dearer. Without a pace the list
+ * price stands, so a path that reports no window keeps today's order.
+ *
+ * @param {number|null} costPerMTok
+ * @param {number|null} quotaPressure
+ * @returns {number|null}
+ */
+function effectiveCost(costPerMTok, quotaPressure) {
+  const cost = numericOrNull(costPerMTok);
+  const pressure = numericOrNull(quotaPressure);
+  return cost !== null && pressure !== null ? cost * pressure : cost;
+}
+
+/**
+ * `pace behind: 12% used, 40% of window elapsed (projected 30%)`. Only a
+ * behind or ahead pace is worth a reason: an on-pace path is unremarkable.
+ *
+ * @param {import('./capacity.js').QuotaPace|null|undefined} pace
+ * @returns {string|null}
+ */
+function paceReason(pace) {
+  if (!pace || (pace.state !== 'behind' && pace.state !== 'ahead')) return null;
+  const used = Math.round(pace.usedPct);
+  const elapsed = Math.round(pace.elapsedPct);
+  const projected = Math.round(pace.projectedPct);
+  return `pace ${pace.state}: ${used}% used, ${elapsed}% of window elapsed (projected ${projected}%)`;
 }
 
 /**
@@ -104,8 +139,8 @@ function healthRank(choice, health) {
  * @returns {number}
  */
 function compareChoices(a, b) {
-  const costA = a.costPerMTok;
-  const costB = b.costPerMTok;
+  const costA = a.effectiveCostPerMTok;
+  const costB = b.effectiveCostPerMTok;
   if (costA !== costB) {
     if (costA === null) return 1;
     if (costB === null) return -1;
@@ -168,6 +203,9 @@ function rank({
       calibration: entry.calibration ?? null,
       costPerMTok: numericOrNull(entry.costPerMTok),
       costSource: entry.costSource ?? null,
+      pace: cap.pace ?? null,
+      quotaPressure: numericOrNull(cap.quotaPressure),
+      effectiveCostPerMTok: effectiveCost(entry.costPerMTok, cap.quotaPressure),
       capacityState: cap.state,
       headroomPct: cap.headroomPct,
       resetsAt: cap.resetsAt,
@@ -231,6 +269,11 @@ function rank({
     } else {
       item.reasons.push(`capacity available: ${cap.headroomPct}% headroom`);
     }
+
+    // Pace scales the cost; the reason says so in the same words the CLI and
+    // the shortlist use, so the number is never unexplained.
+    const paceText = paceReason(item.pace);
+    if (paceText !== null) item.reasons.push(paceText);
 
     // A degraded path stays eligible — a wrong "no model" is worse than a
     // slow one — but it sorts after every healthy choice. The health verdict

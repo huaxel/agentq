@@ -179,7 +179,14 @@ async function fetchCodexbarAsync(provider) {
   for (const slot of ['primary', 'secondary', 'tertiary']) {
     const w = u[slot];
     if (!w || typeof w.usedPercent !== 'number') continue;
-    windows.push({ slot, label: labelWindow(w.windowMinutes), usedPercent: w.usedPercent, resetsAt: w.resetsAt ?? null, resetDescription: w.resetDescription ?? null });
+    windows.push({
+      slot,
+      label: labelWindow(w.windowMinutes),
+      usedPercent: w.usedPercent,
+      resetsAt: w.resetsAt ?? null,
+      resetDescription: w.resetDescription ?? null,
+      ...(typeof w.windowMinutes === 'number' ? { windowMinutes: w.windowMinutes } : {}),
+    });
   }
   const credits = row.credits && typeof row.credits.remaining === 'number' ? row.credits.remaining : null;
   return { windows, credits, updatedAt: u.updatedAt ?? null };

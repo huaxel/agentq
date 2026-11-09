@@ -13,6 +13,19 @@
 const DEFAULT_MAX_AGE_MS = 6 * 3600 * 1000;
 const DEFAULT_THRESHOLD = 85;
 
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * @typedef {object} QuotaPace
+ * @property {string|null} window Label of the window that binds the path.
+ * @property {number} usedPct
+ * @property {number} elapsedPct
+ * @property {number} projectedPct Linear extrapolation to the reset.
+ * @property {'behind'|'on'|'ahead'} state
+ */
+
 /**
  * @typedef {object} CapacityEntry
  * @property {string} path
@@ -22,6 +35,8 @@ const DEFAULT_THRESHOLD = 85;
  * @property {string|null} observedAt
  * @property {boolean} stale
  * @property {string|null} reason
+ * @property {QuotaPace|null} pace Binding window's pace; null when nothing projects.
+ * @property {number|null} quotaPressure Clamped projectedPct / 100; null with pace.
  */
 
 /**
@@ -31,6 +46,104 @@ const DEFAULT_THRESHOLD = 85;
 function toMs(value) {
   const ms = Date.parse(/** @type {string} */ (value));
   return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * A window's label, lower-cased, with any parenthetical qualifier removed:
+ * `5-hour (gosingle)` is a 5-hour window.
+ *
+ * @param {Record<string, any>} window
+ * @returns {string}
+ */
+function windowLabel(window) {
+  const raw = typeof window.label === 'string' ? window.label : '';
+  return raw.replace(/\([^)]*\)/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * The calendar month ending at `resetsAt`, in UTC: the reset minus one month.
+ *
+ * @param {unknown} resetsAt
+ * @returns {number|null}
+ */
+function monthDurationMs(resetsAt) {
+  const resetMs = toMs(resetsAt);
+  if (resetMs === null) return null;
+  const start = new Date(resetMs);
+  start.setUTCMonth(start.getUTCMonth() - 1);
+  const durationMs = resetMs - start.getTime();
+  return durationMs > 0 ? durationMs : null;
+}
+
+/**
+ * How long a quota window lasts, in ms, or null when the window does not say.
+ *
+ * `windowMinutes` wins when it is a positive number. Otherwise the label is
+ * parsed case-insensitively (`5h`, `5-hour`, `daily`, `weekly`, `monthly`,
+ * `<n>m|h|d`), with a parenthetical qualifier ignored. Labels such as
+ * `requests`, `concurrency` or `total` describe no duration, so they give null.
+ *
+ * @param {Record<string, any>|null|undefined} window
+ * @returns {number|null}
+ */
+function windowDurationMs(window) {
+  if (!window || typeof window !== 'object') return null;
+  const minutes = window.windowMinutes;
+  if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) return minutes * MINUTE_MS;
+
+  const label = windowLabel(window);
+  if (!label) return null;
+  if (label === 'daily' || label === 'day') return DAY_MS;
+  if (label === 'weekly' || label === 'week') return 7 * DAY_MS;
+  if (label === 'monthly' || label === 'month') return monthDurationMs(window.resetsAt);
+
+  const match = /^(\d+)\s*-?\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/.exec(label);
+  if (!match) return null;
+  const count = Number(match[1]);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  const unit = match[2];
+  if (unit.startsWith('m')) return count * MINUTE_MS;
+  if (unit.startsWith('h')) return count * HOUR_MS;
+  return count * DAY_MS;
+}
+
+/**
+ * Pace state from the projected usage at the reset.
+ *
+ * @param {number} projectedPct
+ * @returns {'behind'|'on'|'ahead'}
+ */
+function paceState(projectedPct) {
+  if (projectedPct < 80) return 'behind';
+  if (projectedPct > 110) return 'ahead';
+  return 'on';
+}
+
+/**
+ * Pace for one window, or null when it cannot be projected: no duration, no
+ * reset, or too early in the window (< 5% elapsed) to extrapolate.
+ *
+ * @param {Record<string, any>} window
+ * @param {number} usedPct
+ * @param {number} resetMs
+ * @param {number} now
+ * @returns {QuotaPace|null}
+ */
+function windowPace(window, usedPct, resetMs, now) {
+  const durationMs = windowDurationMs(window);
+  if (durationMs === null) return null;
+  const elapsedRaw = ((now - (resetMs - durationMs)) / durationMs) * 100;
+  const elapsedPct = Math.min(100, Math.max(0, elapsedRaw));
+  if (elapsedPct < 5) return null;
+  const projectedPct = usedPct / (elapsedPct / 100);
+  if (!Number.isFinite(projectedPct)) return null;
+  return {
+    window: typeof window.label === 'string' ? window.label : null,
+    usedPct,
+    elapsedPct,
+    projectedPct,
+    state: paceState(projectedPct),
+  };
 }
 
 /**
@@ -57,6 +170,10 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
     let oldResetSinceObservation = false;
     /** @type {number|null} */
     let soonestResetMs = null;
+    /** @type {QuotaPace|null} */
+    let pace = null;
+    /** @type {number|null} */
+    let paceResetMs = null;
 
     for (const window of windows) {
       const resetMs = toMs(window.resetsAt);
@@ -77,6 +194,20 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
       const used = typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent) ? window.usedPercent : 0;
       const headroom = 100 - used;
       headroomPct = headroomPct === null ? headroom : Math.max(headroomPct, headroom);
+
+      // Pace binds to the window with the highest projection: that is the one
+      // whose quota is most likely to run out (or go unused) first. A tie goes
+      // to the earlier reset, so the answer is deterministic.
+      if (resetMs !== null) {
+        const candidate = windowPace(window, used, resetMs, now);
+        if (candidate !== null
+          && (pace === null
+            || candidate.projectedPct > pace.projectedPct
+            || (candidate.projectedPct === pace.projectedPct && paceResetMs !== null && resetMs < paceResetMs))) {
+          pace = candidate;
+          paceResetMs = resetMs;
+        }
+      }
     }
 
     // No windows at all: the path reports no usage, so treat it as full
@@ -115,6 +246,8 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
       observedAt,
       stale,
       reason,
+      pace,
+      quotaPressure: pace === null ? null : Math.min(4, Math.max(0.25, pace.projectedPct / 100)),
     });
   }
 
@@ -141,7 +274,15 @@ function capacityFor(capacity, pathId) {
     observedAt: null,
     stale: true,
     reason: 'no quota data',
+    pace: null,
+    quotaPressure: null,
   };
 }
 
-module.exports = { DEFAULT_MAX_AGE_MS, DEFAULT_THRESHOLD, readCapacity, capacityFor };
+module.exports = {
+  DEFAULT_MAX_AGE_MS,
+  DEFAULT_THRESHOLD,
+  windowDurationMs,
+  readCapacity,
+  capacityFor,
+};

@@ -39,13 +39,25 @@ function choice(id, overrides = {}) {
   };
 }
 
+/** A behind-pace block as capacity.js reports it. */
+function behind(projectedPct, overrides = {}) {
+  return {
+    window: 'weekly',
+    usedPct: projectedPct / 2,
+    elapsedPct: 50,
+    projectedPct,
+    state: 'behind',
+    ...overrides,
+  };
+}
+
 /** @param {any[]} options */
 function rolesById(options) {
   return Object.fromEntries(options.map((option) => [option.id, option.roles]));
 }
 
 test('one choice that earns every role is one option carrying all four', () => {
-  const options = shortlist([choice('solo', { headroomPct: 55, resetsAt: SOON })]);
+  const options = shortlist([choice('solo', { headroomPct: 55, resetsAt: SOON, pace: behind(20) })]);
   assert.equal(options.length, 1);
   assert.deepEqual(options[0].roles, ['cheapest', 'smartest', 'expiring', 'best-value']);
 });
@@ -57,7 +69,7 @@ test('four distinct winners give four options in role order', () => {
     // smartest: the highest intelligence.
     choice('smart', { costPerMTok: 5, intelligence: 90 }),
     // expiring: the only path with a reset time.
-    choice('soon', { costPerMTok: 3, intelligence: 50, headroomPct: 25, resetsAt: SOON }),
+    choice('soon', { costPerMTok: 3, intelligence: 50, headroomPct: 25, resetsAt: SOON, pace: behind(20) }),
     // best-value: the best intelligence per dollar among what is left.
     choice('value', { costPerMTok: 2, intelligence: 60 }),
   ]);
@@ -96,33 +108,49 @@ test('there is no expiring role without a reset time', () => {
   assert.ok(options.every((option) => !option.roles.includes('expiring')));
 });
 
-test('expiring needs at least 20% headroom', () => {
-  const low = shortlist([choice('a', { headroomPct: 19, resetsAt: SOON, costPerMTok: 1 })]);
-  assert.ok(!low[0].roles.includes('expiring'));
+test('expiring needs a behind pace, not a headroom threshold', () => {
+  const onPace = shortlist([choice('a', { headroomPct: 90, resetsAt: SOON, pace: behind(95, { state: 'on' }) })]);
+  assert.ok(!onPace[0].roles.includes('expiring'));
 
-  const atThreshold = shortlist([choice('a', { headroomPct: 20, resetsAt: SOON, costPerMTok: 1 })]);
-  assert.ok(atThreshold[0].roles.includes('expiring'));
+  const ahead = shortlist([choice('a', { headroomPct: 90, resetsAt: SOON, pace: behind(140, { state: 'ahead' }) })]);
+  assert.ok(!ahead[0].roles.includes('expiring'));
+
+  const lowHeadroom = shortlist([choice('a', { headroomPct: 5, resetsAt: SOON, pace: behind(20) })]);
+  assert.ok(lowHeadroom[0].roles.includes('expiring'), 'headroom no longer gates the role');
+
+  assert.ok(shortlist([choice('a', { resetsAt: SOON })]).every((option) => !option.roles.includes('expiring')));
 });
 
-test('the earliest reset wins the expiring role', () => {
+test('there is no expiring option when no choice is behind pace', () => {
   const options = shortlist([
-    choice('later', { path: 'codex', costPerMTok: 1, intelligence: 40, headroomPct: 90, resetsAt: LATER }),
-    choice('sooner', { path: 'mistral', costPerMTok: 2, intelligence: 60, headroomPct: 90, resetsAt: SOON }),
+    choice('a', { path: 'codex', costPerMTok: 1, intelligence: 40, pace: behind(95, { state: 'on' }) }),
+    choice('b', { path: 'mistral', costPerMTok: 2, intelligence: 60, pace: behind(140, { state: 'ahead' }) }),
   ]);
-  assert.deepEqual(rolesById(options).sooner, ['smartest', 'expiring']);
-  assert.deepEqual(rolesById(options).later, ['cheapest', 'best-value']);
+  assert.ok(options.every((option) => !option.roles.includes('expiring')));
+});
+
+test('the most-behind path wins the expiring role, even with a later reset', () => {
+  const options = shortlist([
+    // Earlier reset, but more of its quota will be used by then.
+    choice('earlier-reset', { path: 'codex', costPerMTok: 1, intelligence: 40, resetsAt: SOON, pace: behind(60) }),
+    // Later reset, but most of its quota is projected to go unused.
+    choice('more-unused', { path: 'mistral', costPerMTok: 2, intelligence: 60, resetsAt: LATER, pace: behind(10) }),
+  ]);
+  assert.deepEqual(rolesById(options)['more-unused'], ['smartest', 'expiring']);
+  assert.deepEqual(rolesById(options)['earlier-reset'], ['cheapest', 'best-value']);
 });
 
 test('a distinct path breaks an expiring tie', () => {
-  // Two paths reset at the same time; the one whose path is not already in the
-  // shortlist takes the role, so the options do not collapse onto one path.
+  // Two paths project the same usage and reset at the same time; the one whose
+  // path is not already in the shortlist takes the role, so the options do not
+  // collapse onto one path.
   const options = shortlist([
-    choice('cheap', { path: 'codex', costPerMTok: 1, intelligence: 40, headroomPct: 90, resetsAt: LATER }),
-    choice('smart', { path: 'mistral', costPerMTok: 2, intelligence: 60, headroomPct: 90, resetsAt: SOON }),
-    choice('other', { path: 'xai', costPerMTok: 3, intelligence: 50, headroomPct: 90, resetsAt: SOON }),
+    choice('cheap', { path: 'codex', costPerMTok: 1, intelligence: 40, resetsAt: LATER }),
+    choice('smart', { path: 'mistral', costPerMTok: 2, intelligence: 60, resetsAt: SOON, pace: behind(20) }),
+    choice('other', { path: 'xai', costPerMTok: 3, intelligence: 50, resetsAt: SOON, pace: behind(20) }),
   ]);
   assert.deepEqual(options.map((option) => option.id), ['cheap', 'smart', 'other']);
-  assert.deepEqual(rolesById(options).smart, ['smartest'], 'same reset time, but its path is taken');
+  assert.deepEqual(rolesById(options).smart, ['smartest'], 'same projection and reset, but its path is taken');
   assert.deepEqual(rolesById(options).other, ['expiring']);
   assert.deepEqual(rolesById(options).cheap, ['cheapest', 'best-value']);
 });
@@ -171,6 +199,9 @@ test('an option carries the RankedChoice fields a caller weighs', () => {
       intelligenceSource: 'aa-estimate',
       costPerMTok: 0.1234,
       costSource: 'aa-price',
+      effectiveCostPerMTok: 0.03085,
+      pace: behind(20),
+      quotaPressure: 0.25,
       headroomPct: 42,
       resetsAt: SOON,
       capacityState: 'available',
@@ -184,6 +215,9 @@ test('an option carries the RankedChoice fields a caller weighs', () => {
     intelligenceSource: 'aa-estimate',
     costPerMTok: 0.1234,
     costSource: 'aa-price',
+    effectiveCostPerMTok: 0.03085,
+    pace: behind(20),
+    quotaPressure: 0.25,
     headroomPct: 42,
     resetsAt: SOON,
     capacityState: 'available',

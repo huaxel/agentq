@@ -561,6 +561,29 @@ Explicit model ids bypass routing entirely.
 `--check MODEL` reports a model's capacity entry and eligibility; `--all` lists
 every tier. Both read the same snapshot the queue uses.
 
+### Quota pace
+
+A subscription path's cost is not flat: it depends on how fast the window is
+being consumed. Each window's duration comes from `windowMinutes` when it is a
+positive number, otherwise from its label (`5h`, `5-hour`, `daily`, `weekly`,
+`monthly`, `<n>m|h|d`, case-insensitive). A parenthetical qualifier is ignored,
+so `5-hour (gosingle)` is a 5-hour window, and a label such as `requests`,
+`concurrency` or `total` describes no duration. With `elapsedPct` the fraction
+of the window already gone and `usedPercent` the quota consumed,
+`projectedPct = usedPercent / (elapsedPct / 100)` extrapolates linearly to the
+reset. It is null before 5% of the window has elapsed, where extrapolation is
+noise. The binding window is the one with the highest projection (the earliest
+reset breaks a tie) and reports
+`pace: { window, usedPct, elapsedPct, projectedPct, state }`, where `state` is
+`behind` below 80, `ahead` above 110, and `on` in between.
+
+`quotaPressure = clamp(0.25, 4, projectedPct / 100)` scales the list price into
+`effectiveCostPerMTok`, and that is what routing orders and the shortlist roles
+compare: quota behind pace is cheap because it would reset unused, quota ahead
+of pace is dear because spending it now displaces later work. Pressure only
+scales cost — it never makes a saturated path eligible — and a path with no
+projection keeps its list price and today's order.
+
 ### Options, not a verdict
 
 agentq informs rather than chooses. Ranking answers "what is eligible, cheapest
@@ -568,15 +591,16 @@ first", which is not a decision, and the full ranked list is too long to reason
 about. So a recommendation is a **shortlist** of up to four options, each
 carrying the roles that make it interesting:
 
-- `cheapest` — the lowest cost per MTok. Found by price, not by position, so a
-degraded path can still be the cheapest thing on the board.
+- `cheapest` — the lowest pace-adjusted cost per MTok. Found by price, not by
+position, so a degraded path can still be the cheapest thing on the board.
 - `smartest` — the highest intelligence. A measured score beats an AA-derived
   estimate when the two tie.
-- `expiring` — at least 20% headroom and the earliest reset, so quota that is
-  about to roll over is not wasted. Left out when no path reports a reset time.
-- `best-value` — the most intelligence per dollar among the choices that have
-  not already earned a role. A free (local) path only counts when no paid choice
-  exists.
+- `expiring` — the most-behind path: among choices whose pace is `behind`, the
+  lowest projection, which is the most quota projected to go unused. Ties go to
+  the earlier reset. Left out when no choice is behind pace.
+- `best-value` — the most intelligence per pace-adjusted dollar among the
+  choices that have not already earned a role. A free (local) path only counts
+  when no paid choice exists.
 
 A choice that earns several roles is one option with several roles, the
 remaining slots are filled in rank order as `alternative`, and ties prefer a

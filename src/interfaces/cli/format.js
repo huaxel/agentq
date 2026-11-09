@@ -80,6 +80,31 @@ function costCell(entry) {
 }
 
 /**
+ * Pace-adjusted cost as a table cell, marked like the list price it scales.
+ *
+ * @param {{ effectiveCostPerMTok?: number|null, costSource?: string|null }} entry
+ * @returns {string}
+ */
+function effectiveCostCell(entry) {
+  if (entry.effectiveCostPerMTok == null) return '—';
+  const value = `$${Number(entry.effectiveCostPerMTok).toFixed(2)}`;
+  return entry.costSource === 'aa-price' ? `~${value}` : value;
+}
+
+/**
+ * Pace as a table cell: `behind 30%`, `ahead 140%`, `on 95%`, or `—` when the
+ * path reports no window it can project.
+ *
+ * @param {{ pace?: { state?: string, projectedPct?: number|null }|null }} entry
+ * @returns {string}
+ */
+function paceCell(entry) {
+  const pace = entry && entry.pace;
+  if (!pace || typeof pace.projectedPct !== 'number' || !Number.isFinite(pace.projectedPct)) return '—';
+  return `${pace.state} ${Math.round(pace.projectedPct)}%`;
+}
+
+/**
  * @param {ReturnType<typeof buildModelRows>[number]} row
  * @param {number|string} index
  * @returns {string}
@@ -120,7 +145,7 @@ function formatModelTable({ catalog = [], capacity = null, decision = null, titl
  * `default` is printed by the caller underneath, never as a row: it is what
  * "auto" would pick, not a verdict on the options.
  *
- * @param {Array<{ id: string, path: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, headroomPct: number|null, resetsAt: string|null }>} [options]
+ * @param {Array<{ id: string, path: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, effectiveCostPerMTok?: number|null, pace?: { state?: string, projectedPct?: number|null }|null, headroomPct: number|null, resetsAt: string|null }>} [options]
  * @param {{ title?: string }} [input]
  * @returns {string}
  */
@@ -128,14 +153,15 @@ function formatOptionsTable(options = [], { title = 'options' } = {}) {
   const lines = [
     title,
     '',
-    `  ${'id'.padEnd(44)} ${'path'.padEnd(12)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'headroom'.padStart(8)}  resets`,
+    `  ${'id'.padEnd(44)} ${'path'.padEnd(12)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'eff $/MTok'.padStart(10)} ${'headroom'.padStart(8)}  pace`,
   ];
   for (const option of options) {
     const headroom = option.headroomPct == null ? '—' : `${option.headroomPct}%`;
     const roles = (option.roles || []).join(', ');
     lines.push(
       `  ${String(option.id).padEnd(44)} ${String(option.path || '—').padEnd(12)} ${roles.padEnd(40)} `
-      + `${intelligenceCell(option).padStart(5)} ${costCell(option).padStart(7)} ${headroom.padStart(8)}  ${option.resetsAt || '—'}`,
+      + `${intelligenceCell(option).padStart(5)} ${costCell(option).padStart(7)} ${effectiveCostCell(option).padStart(10)} `
+      + `${headroom.padStart(8)}  ${paceCell(option)}`,
     );
   }
   return lines.join('\n');
@@ -194,6 +220,8 @@ module.exports = {
   formatModelRow,
   formatModelTable,
   formatOptionsTable,
+  effectiveCostCell,
+  paceCell,
   truncateRepo,
   formatCost,
   formatJobBlock,

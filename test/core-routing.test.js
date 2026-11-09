@@ -297,3 +297,39 @@ test('ranked items carry the capacity evidence used to decide', () => {
   assert.match(choice.reasons.join(' '), /intelligence 55 >= floor 38/);
   assert.match(choice.reasons.join(' '), /capacity available: 42% headroom/);
 });
+
+test('a behind-pace path outranks a cheaper list-price path once cost is adjusted', () => {
+  const catalog = [
+    entry('scarce', { path: 'p-scarce', costPerMTok: 3, intelligence: 50 }),
+    entry('cheap', { path: 'p-cheap', costPerMTok: 1, intelligence: 50 }),
+  ];
+  const capacity = capacityOf(
+    cap('p-scarce', {
+      pace: { window: 'weekly', usedPct: 10, elapsedPct: 50, projectedPct: 20, state: 'behind' },
+      quotaPressure: 0.25,
+    }),
+    cap('p-cheap', { pace: null, quotaPressure: null }),
+  );
+  const { choices } = rank({ catalog, capacity, tier: 'medium' });
+  assert.deepEqual(choices.map((choice) => choice.id), ['scarce', 'cheap']);
+  assert.equal(choices[0].effectiveCostPerMTok, 0.75, '3 × 0.25');
+  assert.equal(choices[1].effectiveCostPerMTok, 1);
+  assert.match(
+    choices[0].reasons.join('\n'),
+    /pace behind: 10% used, 50% of window elapsed \(projected 20%\)/,
+  );
+  assert.ok(!choices[1].reasons.some((reason) => reason.startsWith('pace ')));
+});
+
+test('a null pace leaves the order on list price', () => {
+  const catalog = [
+    entry('pricey', { path: 'p-pricey', costPerMTok: 3, intelligence: 50 }),
+    entry('cheap', { path: 'p-cheap', costPerMTok: 1, intelligence: 50 }),
+  ];
+  const capacity = capacityOf(cap('p-pricey'), cap('p-cheap'));
+  const { choices } = rank({ catalog, capacity });
+  assert.deepEqual(choices.map((choice) => choice.id), ['cheap', 'pricey']);
+  assert.equal(choices[0].effectiveCostPerMTok, 1);
+  assert.ok(choices.every((choice) => choice.pace === null && choice.quotaPressure === null));
+  assert.ok(choices.every((choice) => !choice.reasons.some((reason) => reason.startsWith('pace '))));
+});
