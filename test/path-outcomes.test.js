@@ -451,7 +451,10 @@ sleep 30
 `);
   const result = await runJobWithRetries(
     claimed,
-    { executor, timeout: 400, retries: 1, retryBaseMs: 0 },
+    // The first attempt sleeps until killed; the retry must finish inside the
+    // same budget, including bash and job setup on a loaded machine. 400ms was
+    // too tight to be deterministic.
+    { executor, timeout: 3000, retries: 1, retryBaseMs: 0 },
     source,
   );
   assert.equal(result.status, 'succeeded');
