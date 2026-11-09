@@ -794,28 +794,33 @@ test('pick reports the routing decision as JSON and exits non-zero when nothing 
   assert.equal(picked.exitCode, 0);
   const decision = JSON.parse(picked.stdout);
   assert.equal(decision.tier, 'medium');
-  assert.equal(decision.choice.id, CHEAP_MODEL);
-  assert.equal(decision.choice.path, 'mistral');
+  assert.equal(decision.default.id, CHEAP_MODEL);
+  assert.equal(decision.default.path, 'mistral');
   assert.ok(decision.rejected.length > 0);
 
   fixture.writeQuota(quotaFixture({ mistral: null, codex: null }));
   const none = run(['pick', '--quota', fixture.quotaPath, '--json'], fixture.env());
   assert.equal(none.exitCode, 1);
-  assert.equal(JSON.parse(none.stdout).choice, null);
+  assert.equal(JSON.parse(none.stdout).default, null);
 });
 
-test('pick --tier changes the recommendation and prints a table without --json', () => {
+test('pick --tier changes the recommendation and prints the options table without --json', () => {
   const fixture = writeRoutingFixture();
   const small = run(['pick', '--quota', fixture.quotaPath, '--tier', 'small', '--json'], fixture.env());
-  assert.equal(JSON.parse(small.stdout).choice.id, CHEAP_MODEL);
+  assert.equal(JSON.parse(small.stdout).default.id, CHEAP_MODEL);
 
   const big = run(['pick', '--quota', fixture.quotaPath, '--tier', 'big', '--json'], fixture.env());
-  assert.equal(JSON.parse(big.stdout).choice.id, STRONG_MODEL);
+  assert.equal(JSON.parse(big.stdout).default.id, STRONG_MODEL);
 
   const table = run(['pick', '--quota', fixture.quotaPath], fixture.env());
   assert.equal(table.exitCode, 0);
-  assert.match(table.stdout, /→ +\d+ +mistral\/deepseek-v4-1-flash-1017/);
-  assert.match(table.stdout, /auto → mistral\/deepseek-v4-1-flash-1017/);
+  // The shortlist, with the roles each option plays, and `default` underneath
+  // as a footnote rather than a verdict.
+  assert.match(table.stdout, /options \(tier medium\)/);
+  assert.match(table.stdout, /mistral\/deepseek-v4-1-flash-1017 +mistral +cheapest, expiring, best-value/);
+  assert.match(table.stdout, /openai-codex\/gpt-5\.6-luna +codex +smartest/);
+  assert.match(table.stdout, /default → mistral\/deepseek-v4-1-flash-1017/);
+  assert.doesNotMatch(table.stdout, /auto → /);
 });
 
 test('pick leaves an explicit model untouched', () => {
@@ -2486,7 +2491,7 @@ test('pick refreshes stale quota and prints one line to stderr', () => {
   assert.match(result.stderr, /quota refreshed in \d+\.\ds/);
   assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'ran');
   // Routing ran against the refreshed snapshot, not the stale one.
-  assert.ok(JSON.parse(result.stdout).choice, result.stdout);
+  assert.ok(JSON.parse(result.stdout).default, result.stdout);
 });
 
 test('a rate-limited refresh is silent, a failed one is reported', () => {

@@ -59,10 +59,12 @@ function fakeDeps(overrides = {}) {
     getCapacity: () => CAPACITY,
     recommend: (options) => {
       calls.recommend.push(options);
+      const ranked = { id: 'gpt-5', path: 'codex', intelligence: 8.2, costPerMTok: 3, capacityState: 'available', headroomPct: 62, resetsAt: null, observedAt: '2026-11-08T10:00:00Z', reasons: ['capacity available'] };
       return {
-        choice: { id: 'gpt-5', path: 'codex', intelligence: 8.2, costPerMTok: 3, capacityState: 'available', headroomPct: 62, resetsAt: null, observedAt: '2026-11-08T10:00:00Z', reasons: ['capacity available'] },
-        choices: [],
-        rejected: [],
+        options: [{ id: 'gpt-5', path: 'codex', roles: ['cheapest', 'smartest'], intelligence: 8.2, costPerMTok: 3, capacityState: 'available', headroomPct: 62, resetsAt: null, reasons: ['capacity available'] }],
+        default: ranked,
+        choices: [ranked],
+        rejected: [{ id: 'old-model', reasons: ['subscription ended'] }],
         policy: { tier: options.tier, minIntelligence: options.minIntelligence ?? null, allowUnknownCapacity: options.allowUnknownCapacity },
       };
     },
@@ -214,15 +216,28 @@ test('list_models validates argument types and bounds', () => {
   assert.throws(() => entry.handler({ only_available: 'yes' }), /only_available must be a boolean/);
 });
 
-test('recommend_model passes validated options and returns the core output verbatim', () => {
+test('recommend_model passes validated options and returns the shortlist', () => {
   const { deps, calls } = fakeDeps();
   const result = tool('recommend_model', deps).handler({
     tier: 'big', min_intelligence: 7, allow_unknown_capacity: true,
   });
   assert.deepEqual(calls.recommend, [{ tier: 'big', minIntelligence: 7, allowUnknownCapacity: true }]);
-  assert.equal(result.choice.id, 'gpt-5');
+  assert.equal(result.default.id, 'gpt-5');
+  assert.deepEqual(result.options.map((option) => option.roles), [['cheapest', 'smartest']]);
+  assert.equal(result.rejectedCount, 1);
   assert.equal(result.policy.tier, 'big');
-  assert.ok(Array.isArray(result.rejected));
+  // The full ranked lists are opt-in: they are what makes the payload unusable.
+  assert.equal(result.choices, undefined);
+  assert.equal(result.rejected, undefined);
+});
+
+test('recommend_model returns the full ranked lists only with verbose', () => {
+  const { deps } = fakeDeps();
+  const result = tool('recommend_model', deps).handler({ tier: 'big', verbose: true });
+  assert.deepEqual(result.choices.map((choice) => choice.id), ['gpt-5']);
+  assert.deepEqual(result.rejected.map((choice) => choice.id), ['old-model']);
+  assert.equal(result.rejectedCount, 1);
+  assert.equal(result.default.id, 'gpt-5');
 });
 
 test('recommend_model defaults to the medium tier and conservative capacity', () => {
@@ -255,7 +270,9 @@ test('recommend_for_task routes an auto task through the routing core', () => {
   assert.equal(result.mode, 'routed');
   assert.equal(result.tier, 'big');
   assert.equal(result.task.id, 't1');
-  assert.equal(result.choice.id, 'gpt-5');
+  assert.equal(result.default.id, 'gpt-5');
+  assert.deepEqual(result.options.map((option) => option.id), ['gpt-5']);
+  assert.equal(result.choices, undefined, 'the full list is verbose-only');
 });
 
 test('recommend_for_task reports the estimate fields for an explicit estimated model', () => {
@@ -580,13 +597,16 @@ test('bin/agentq-mcp.js recommends through the real routing core snapshot', asyn
   try {
     const { lines } = await runServer([
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recommend_model', arguments: { tier: 'small' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recommend_model', arguments: { tier: 'small', verbose: true } } },
       { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'capacity_overview', arguments: {} } },
     ], { env: { AGENTQ_HOME: home, AGENTQ_QUOTA: quotaPath, AGENTQ_ROI_OUTPUT: roiOutputPath } });
     const [, recommend, capacity] = lines.map((line) => JSON.parse(line));
     assert.equal(recommend.result.isError, undefined, JSON.stringify(recommend.result));
-    assert.equal(recommend.result.structuredContent.choice.id, 'openai-codex/gpt-5.6-terra');
+    assert.equal(recommend.result.structuredContent.default.id, 'openai-codex/gpt-5.6-terra');
+    assert.ok(Array.isArray(recommend.result.structuredContent.options));
+    // verbose returns the full ranked lists; the count is reported either way.
     assert.ok(Array.isArray(recommend.result.structuredContent.choices));
+    assert.ok(recommend.result.structuredContent.rejectedCount > 0);
     // Paths with no quota data are reported as unknown, never available.
     assert.ok(recommend.result.structuredContent.rejected.some((r) => r.path === 'mistral'));
     assert.equal(capacity.result.isError, undefined, JSON.stringify(capacity.result));

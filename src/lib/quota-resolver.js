@@ -50,14 +50,14 @@ function snapshotOptions(opts = {}) {
  *
  * @param {string} tier
  * @param {{ quotaPath?: string, threshold?: number, now?: number, fallback?: string, pathHealth?: Map<string, { state: string }>|null }} [opts]
- * @returns {{ model: string, path: string, tier: string, headroom: number|null, source: string, choice?: any, rejected?: any[] }}
+ * @returns {{ model: string, path: string, tier: string, headroom: number|null, source: string, default?: any, rejected?: any[] }}
  * @throws {Error} when no runnable is eligible and no fallback is configured.
  */
 function resolveTier(tier, opts = {}) {
   const resolvedTier = normalizeTier(tier);
   const decision = recommend({ ...snapshotOptions(opts), tier: resolvedTier });
 
-  if (!decision.choice) {
+  if (!decision.default) {
     if (opts.fallback) {
       return {
         model: opts.fallback,
@@ -72,12 +72,12 @@ function resolveTier(tier, opts = {}) {
   }
 
   return {
-    model: decision.choice.id,
-    path: decision.choice.path,
+    model: decision.default.id,
+    path: decision.default.path,
     tier: resolvedTier,
-    headroom: decision.choice.headroomPct,
+    headroom: decision.default.headroomPct,
     source: 'routing',
-    choice: decision.choice,
+    default: decision.default,
     rejected: decision.rejected,
   };
 }
@@ -213,7 +213,7 @@ if (require.main === module) {
 
   // A degraded pick stays eligible but is worth a marker: a wrong "no model"
   // is worse than a slow one, so this is a note, not a refusal.
-  const [degraded] = result && result.choice ? degradedMarkers([result.choice]) : [];
+  const [degraded] = result && result.default ? degradedMarkers([result.default]) : [];
   if (degraded) {
     process.stderr.write(`degraded: ${degraded.path} (${degraded.reason})\n`);
   }

@@ -91,13 +91,18 @@ task without write access.
 | --- | --- | --- |
 | `capacity_overview` | none | `generatedAt`, per-path capacity (`state`, `headroomPct`, `resetsAt`, `observedAt`, `stale`, `reason`), and `warnings` for every stale or unknown path. |
 | `list_models` | `min_intelligence` (number ≥ 0), `only_available` (boolean) | Catalog entries joined with the capacity state of the path each model runs on. A path with no capacity entry is reported as `unknown` and `stale`. `intelligenceSource` is `roi` for a measured score, `aa-estimate` for a conservative Artificial Analysis estimate (with `aaIndex` and `calibration: { n, r, rmse }`), and `null` when the model has no intelligence at all; `scored` is true only for a real score. |
-| `recommend_model` | `tier` (`small`\|`medium`\|`big`, default `medium`), `min_intelligence`, `allow_unknown_capacity` (default `false`) | The routing core's decision verbatim: `choice`, ordered `choices`, `rejected` candidates with reasons, and `policy`. Every choice carries `intelligenceSource`, `aaIndex` and `calibration`, and a reason built on an estimate reads `intelligence ≈53.9 (AA estimate, n=6, r=0.95)`. Advisory only. |
-| `recommend_for_task` | `id`, `tier` (default `medium`) | Routing recommendation for one stored task. Model `auto` (or empty) returns the routing decision (`mode: "routed"`). An explicit model returns its catalog entry, its path's capacity, `eligible`, and `reasons` (`mode: "explicit"`). |
+| `recommend_model` | `tier` (`small`\|`medium`\|`big`, default `medium`), `min_intelligence`, `allow_unknown_capacity` (default `false`), `verbose` (default `false`) | A shortlist of up to four `options` with their trade-offs: each option names the `roles` it plays (`cheapest`, `smartest`, `expiring`, `best-value`, `alternative`) plus its `intelligence`, `costPerMTok`, `headroomPct` and `resetsAt`. The caller chooses and passes the chosen id to `dispatch_task` as `model`; `default` is what `"auto"` would pick. Also `rejectedCount` and `policy`. `verbose: true` adds the full ranked `choices` and the `rejected` candidates with reasons. Every choice carries `intelligenceSource`, `aaIndex` and `calibration`, and a reason built on an estimate reads `intelligence ≈53.9 (AA estimate, n=6, r=0.95)`. Advisory only. |
+| `recommend_for_task` | `id`, `tier` (default `medium`), `verbose` (default `false`) | Routing recommendation for one stored task. Model `auto` (or empty) returns the same shortlist shape as `recommend_model` (`mode: "routed"`). An explicit model returns its catalog entry, its path's capacity, `eligible`, and `reasons` (`mode: "explicit"`). |
 | `list_tasks` | `status`, `kind`, `limit` (default 20, max 100) | Summary rows only: `id`, `kind`, `status`, `repo`, `issue_num`, `model`, `priority`, `approval_state`, `created_at`, `attempts`. |
 | `get_task` | `id` | An explicit allowlist of task columns, with every user-influenced string confined to `untrusted_content`. `claim_token` is never returned. |
 | `dispatch_status` | `id` | The task's `status`, `slot_held` (a running dispatch claim or a live spawned worker occupies a slot), `worker_alive` (this server can see a live pid AND the task is still `running`), a `hint` when a slot is held without a visible worker, the worker this server dispatched for it (`pid`, `alive`, `model`, `started_at`, `log`), and the last 4 KB of its dispatch log under `untrusted_content`. A finished worker's record is reported once (with its final log tail) and then dropped; the log file stays on disk. `dispatched` is `null` when this server process never dispatched that task (including after a restart), while `slot_held` still reflects the queue. |
 
 `approval_state` is one of `not_required`, `pending`, `approved`, `rejected`.
+
+`dispatch_task` records one `model-chosen` event per dispatch (`{ model, chosenBy, roles }`),
+where `chosenBy` is `caller`, `pinned` or `auto` and `roles` are the shortlist roles the
+model played (`[]` when it was not on the shortlist, which is always the case for a pin or
+a caller-chosen model: those are not re-routed).
 
 ### Quota freshness
 

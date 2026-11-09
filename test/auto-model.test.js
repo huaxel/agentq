@@ -41,7 +41,7 @@ test('auto picks the cheapest eligible runnable for the tier', () => {
   assert.equal(resolved.provider, 'mistral');
   assert.equal(resolved.tier, 'medium');
   assert.equal(resolved.explicit, false);
-  assert.equal(resolved.choice.costPerMTok, 0.1);
+  assert.equal(resolved.default.costPerMTok, 0.1);
 });
 
 test('the tier floor changes which runnable is eligible', () => {

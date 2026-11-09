@@ -566,7 +566,7 @@ test('pick demotes a degraded path and prints a marker', () => {
     const decision = runCli(['--db', dbPath, 'pick', '--quota', fixture.quotaPath, '--json'], env);
     assert.equal(decision.exitCode, 0, decision.stderr);
     const parsed = JSON.parse(decision.stdout);
-    assert.equal(parsed.choice.id, STRONG_MODEL);
+    assert.equal(parsed.default.id, STRONG_MODEL);
     const demotedChoice = parsed.choices.find((choice) => choice.path === 'mistral');
     assert.ok(demotedChoice, 'the degraded path stays eligible');
     assert.match(demotedChoice.reasons.join('\n'), /path degraded: 3 consecutive failures \(3 timeout, 0 error, 0 lost\)/);
@@ -574,7 +574,7 @@ test('pick demotes a degraded path and prints a marker', () => {
     const table = runCli(['--db', dbPath, 'pick', '--quota', fixture.quotaPath], env);
     assert.equal(table.exitCode, 0, table.stderr);
     assert.match(table.stdout, /degraded: mistral \(path degraded: 3 consecutive failures \(3 timeout, 0 error, 0 lost\)/);
-    assert.match(table.stdout, new RegExp(`auto → ${STRONG_MODEL.replace(/\//g, '\\/')}`));
+    assert.match(table.stdout, new RegExp(`default → ${STRONG_MODEL.replace(/\//g, '\\/')}`));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -592,7 +592,7 @@ test('pick with AGENTQ_PATH_HEALTH=0 ignores recorded failures', () => {
       { ...fixture.env(), AGENTQ_PATH_HEALTH: '0' },
     );
     assert.equal(decision.exitCode, 0, decision.stderr);
-    assert.equal(JSON.parse(decision.stdout).choice.id, CHEAP_MODEL);
+    assert.equal(JSON.parse(decision.stdout).default.id, CHEAP_MODEL);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -169,25 +169,31 @@ test('ranking is deterministic across repeated runs', () => {
   assert.deepEqual(second, first);
 });
 
-test('recommend returns the first choice, or null with the rejection reasons', () => {
+test('recommend returns a shortlist plus the default, or null with the rejection reasons', () => {
   const capacity = capacityOf(cap('codex'));
   const catalog = [
     entry('best', { costPerMTok: 1 }),
     entry('second', { costPerMTok: 2 }),
   ];
   const picked = recommend({ catalog, capacity, tier: 'medium' });
-  assert.equal(picked.choice.id, 'best');
+  // `default` is the old `choice`: the head of the ranked list, not a verdict.
+  assert.deepEqual(picked.default, picked.choices[0]);
+  assert.equal(picked.default.id, 'best');
   assert.deepEqual(picked.choices.map((c) => c.id), ['best', 'second']);
+  assert.deepEqual(picked.options.map((option) => option.id), ['best', 'second']);
+  assert.ok(picked.options.every((option) => option.roles.length >= 1));
   assert.deepEqual(picked.rejected, []);
   assert.deepEqual(picked.policy, { floor: TIER_FLOORS.medium, order: ORDER });
 
   const none = recommend({ catalog: [entry('dumb', { intelligence: 1 })], capacity, tier: 'big' });
-  assert.equal(none.choice, null);
+  assert.equal(none.default, null);
+  assert.deepEqual(none.options, []);
   assert.deepEqual(none.choices, []);
   assert.equal(none.rejected.length, 1);
 
   const empty = recommend({ catalog: [], capacity: null, tier: 'small' });
-  assert.equal(empty.choice, null);
+  assert.equal(empty.default, null);
+  assert.deepEqual(empty.options, []);
   assert.deepEqual(empty.choices, []);
   assert.deepEqual(empty.rejected, []);
 });

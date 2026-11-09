@@ -277,7 +277,7 @@ async function chooseModel(rl, source = null) {
   console.log(`\npick a model — auto = cheapest eligible (tier ${DEFAULT_TIER})\n`);
   for (const marker of degradedMarkers(decision.choices)) console.log(`  degraded: ${marker.path} (${marker.reason})`);
   console.log(`  #  ${'model'.padEnd(44)} ${'path'.padEnd(12)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)}  capacity`);
-  console.log(`  0  ${'auto'.padEnd(44)} ${'—'.padEnd(12)} ${'—'.padStart(5)} ${'—'.padStart(7)}  ${decision.choice ? `→ ${decision.choice.id}` : `none eligible: ${summarizeRejections(decision.rejected)}`}`);
+  console.log(`  0  ${'auto'.padEnd(44)} ${'—'.padEnd(12)} ${'—'.padStart(5)} ${'—'.padStart(7)}  ${decision.default ? `→ ${decision.default.id}` : `none eligible: ${summarizeRejections(decision.rejected)}`}`);
   console.log(formatModelRow(julesRow, 'j'));
   rows.forEach((row, i) => console.log(formatModelRow(row, i + 1)));
   console.log('');
@@ -493,8 +493,8 @@ async function openPr(rl, job) {
 function doPick(source = null) {
   const decision = recommend({ tier: DEFAULT_TIER, pathHealth: loadPathHealth(source && source.db) });
   for (const marker of degradedMarkers(decision.choices)) console.log(`  degraded: ${marker.path} (${marker.reason})`);
-  if (decision.choice) {
-    console.log(`auto would pick: ${decision.choice.id} (${decision.choice.path}, tier ${DEFAULT_TIER})`);
+  if (decision.default) {
+    console.log(`auto would pick: ${decision.default.id} (${decision.default.path}, tier ${DEFAULT_TIER})`);
     return;
   }
   console.log(`auto would pick nothing (tier ${DEFAULT_TIER}): ${summarizeRejections(decision.rejected)}`);

@@ -561,6 +561,34 @@ Explicit model ids bypass routing entirely.
 `--check MODEL` reports a model's capacity entry and eligibility; `--all` lists
 every tier. Both read the same snapshot the queue uses.
 
+### Options, not a verdict
+
+agentq informs rather than chooses. Ranking answers "what is eligible, cheapest
+first", which is not a decision, and the full ranked list is too long to reason
+about. So a recommendation is a **shortlist** of up to four options, each
+carrying the roles that make it interesting:
+
+- `cheapest` — the lowest cost per MTok. Found by price, not by position, so a
+degraded path can still be the cheapest thing on the board.
+- `smartest` — the highest intelligence. A measured score beats an AA-derived
+  estimate when the two tie.
+- `expiring` — at least 20% headroom and the earliest reset, so quota that is
+  about to roll over is not wasted. Left out when no path reports a reset time.
+- `best-value` — the most intelligence per dollar among the choices that have
+  not already earned a role. A free (local) path only counts when no paid choice
+  exists.
+
+A choice that earns several roles is one option with several roles, the
+remaining slots are filled in rank order as `alternative`, and ties prefer a
+path that is not already on the list so the options stay distinct. A degraded
+path may appear, always with its degraded reason attached.
+
+The result also carries a `default`: the head of the ranked list. It exists only
+for `auto` — the dispatch mode where nobody is there to choose — and is not a
+verdict on the options. A caller (a person, or a main assistant reading the MCP
+tools) picks an option and passes its id to `dispatch_task` as `model`; the
+choice is recorded in the task's event trail with the roles that model played.
+
 ### Path health
 
 Every execution attempt's outcome is recorded per quota path (`path_outcomes`:

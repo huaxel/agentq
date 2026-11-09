@@ -28,17 +28,17 @@ function capacityText(entry) {
  * @param {{
  *   catalog?: import('../../core/catalog.js').CatalogEntry[],
  *   capacity?: Map<string, import('../../core/capacity.js').CapacityEntry>|null,
- *   decision?: { choice: any, rejected: any[] }|null,
+ *   decision?: { default: any, rejected: any[] }|null,
  * }} [input]
  * @returns {Array<{ model: string, path: string, intelligence: number|null, costPerMTok: number|null, capacity: any, recommended: boolean, reasons: string[] }>}
  */
 function buildModelRows({ catalog = [], capacity = null, decision = null } = {}) {
-  const recommendedId = decision && decision.choice ? decision.choice.id : null;
+  const recommendedId = decision && decision.default ? decision.default.id : null;
   const rejected = new Map(((decision && decision.rejected) || []).map((item) => [item.id, item.reasons || []]));
 
   return catalog.map((entry) => {
     const recommended = entry.id === recommendedId;
-    const reasons = rejected.get(entry.id) ?? (recommended ? decision.choice.reasons || [] : []);
+    const reasons = rejected.get(entry.id) ?? (recommended ? decision.default.reasons || [] : []);
     return {
       model: entry.id,
       path: entry.path,
@@ -54,19 +54,39 @@ function buildModelRows({ catalog = [], capacity = null, decision = null } = {})
 }
 
 /**
+ * Intelligence as a table cell. An AA-derived estimate is marked `~` so it is
+ * never read as a real score.
+ *
+ * @param {{ intelligence?: number|null, intelligenceSource?: string|null }} entry
+ * @returns {string}
+ */
+function intelligenceCell(entry) {
+  if (entry.intelligence == null) return '—';
+  const value = Number(entry.intelligence).toFixed(1);
+  return entry.intelligenceSource === 'aa-estimate' ? `~${value}` : value;
+}
+
+/**
+ * Cost as a table cell. An AA list price is marked `~` like the estimate it
+ * travels with.
+ *
+ * @param {{ costPerMTok?: number|null, costSource?: string|null }} entry
+ * @returns {string}
+ */
+function costCell(entry) {
+  if (entry.costPerMTok == null) return '—';
+  const value = `$${Number(entry.costPerMTok).toFixed(2)}`;
+  return entry.costSource === 'aa-price' ? `~${value}` : value;
+}
+
+/**
  * @param {ReturnType<typeof buildModelRows>[number]} row
  * @param {number|string} index
  * @returns {string}
  */
 function formatModelRow(row, index) {
-  // An AA-derived estimate is marked `~` so it is never read as a real score.
-  const intel = row.intelligence == null
-    ? '—'
-    : row.intelligenceSource === 'aa-estimate' ? `~${row.intelligence.toFixed(1)}` : row.intelligence.toFixed(1);
-  // An AA list price is marked `~` like the estimate it travels with.
-  const cost = row.costPerMTok == null
-    ? '—'
-    : row.costSource === 'aa-price' ? `~$${row.costPerMTok.toFixed(2)}` : `$${row.costPerMTok.toFixed(2)}`;
+  const intel = intelligenceCell(row);
+  const cost = costCell(row);
   const mark = row.recommended ? '→' : ' ';
   const note = row.recommended ? 'recommended' : ((row.reasons || []).at(-1) || 'eligible');
   return `  ${mark} ${index}  ${row.model.padEnd(44)} ${(row.path || '—').padEnd(12)} ${intel.padStart(5)} ${cost.padStart(7)}  ${capacityText(row.capacity).padEnd(30)} ${note}`;
@@ -76,7 +96,7 @@ function formatModelRow(row, index) {
  * @param {{
  *   catalog?: import('../../core/catalog.js').CatalogEntry[],
  *   capacity?: Map<string, import('../../core/capacity.js').CapacityEntry>|null,
- *   decision?: { choice: any, rejected: any[], policy?: { floor: number } }|null,
+ *   decision?: { default: any, rejected: any[], policy?: { floor: number } }|null,
  *   title?: string,
  * }} [input]
  * @returns {string}
@@ -89,6 +109,35 @@ function formatModelTable({ catalog = [], capacity = null, decision = null, titl
     `  #  ${'model'.padEnd(44)} ${'path'.padEnd(12)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)}  capacity`,
   ];
   buildModelRows({ catalog, capacity, decision }).forEach((row, i) => lines.push(formatModelRow(row, i + 1)));
+  return lines.join('\n');
+}
+
+/**
+ * The shortlist as a short table: one row per option, with the roles it plays.
+ *
+ * This is what `agentq pick` prints instead of the whole catalog: the point of
+ * the routing core is to inform a choice, and a caller cannot weigh forty rows.
+ * `default` is printed by the caller underneath, never as a row: it is what
+ * "auto" would pick, not a verdict on the options.
+ *
+ * @param {Array<{ id: string, path: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, headroomPct: number|null, resetsAt: string|null }>} [options]
+ * @param {{ title?: string }} [input]
+ * @returns {string}
+ */
+function formatOptionsTable(options = [], { title = 'options' } = {}) {
+  const lines = [
+    title,
+    '',
+    `  ${'id'.padEnd(44)} ${'path'.padEnd(12)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'headroom'.padStart(8)}  resets`,
+  ];
+  for (const option of options) {
+    const headroom = option.headroomPct == null ? '—' : `${option.headroomPct}%`;
+    const roles = (option.roles || []).join(', ');
+    lines.push(
+      `  ${String(option.id).padEnd(44)} ${String(option.path || '—').padEnd(12)} ${roles.padEnd(40)} `
+      + `${intelligenceCell(option).padStart(5)} ${costCell(option).padStart(7)} ${headroom.padStart(8)}  ${option.resetsAt || '—'}`,
+    );
+  }
   return lines.join('\n');
 }
 
@@ -139,9 +188,12 @@ function summarizeCosts(jobs) {
 
 module.exports = {
   capacityText,
+  intelligenceCell,
+  costCell,
   buildModelRows,
   formatModelRow,
   formatModelTable,
+  formatOptionsTable,
   truncateRepo,
   formatCost,
   formatJobBlock,

@@ -84,7 +84,7 @@ function providerFor(model, config) {
  *   config?: Record<string, any>|null,
  *   pathHealth?: Map<string, { state: 'healthy'|'degraded', consecutive: number, lastFailureAt: string|null, reason: string|null }>|null,
  * }} [options]
- * @returns {{ model: string, provider: string|null, tier: string|null, explicit: boolean, choice?: import('../core/routing.js').RankedChoice, decision?: ReturnType<typeof recommend> }}
+ * @returns {{ model: string, provider: string|null, tier: string|null, explicit: boolean, default?: import('../core/routing.js').RankedChoice, decision?: ReturnType<typeof recommend> }}
  */
 function resolveAutoModel(storedModel, options = {}) {
   if (storedModel !== 'auto') {
@@ -107,14 +107,16 @@ function resolveAutoModel(storedModel, options = {}) {
     now: options.now,
     pathHealth: options.pathHealth,
   });
-  if (!decision.choice) throw noModelError(tier, decision.rejected);
+  // "auto" is the one mode that must pick by itself, so it takes the routing
+  // core's default rather than reasoning about the shortlist.
+  if (!decision.default) throw noModelError(tier, decision.rejected);
 
   return {
-    model: decision.choice.id,
-    provider: decision.choice.path,
+    model: decision.default.id,
+    provider: decision.default.path,
     tier,
     explicit: false,
-    choice: decision.choice,
+    default: decision.default,
     decision,
   };
 }

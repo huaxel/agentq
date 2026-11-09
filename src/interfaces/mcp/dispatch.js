@@ -268,38 +268,73 @@ function assertDispatchableModel(model, deps) {
 }
 
 /**
+ * The roles a model plays in the shortlist the routing core just returned.
+ *
+ * Empty when the model is not on it, and always empty for a pin (a pin is not
+ * re-routed). For a caller-chosen model the shortlist is read only to record
+ * which option the caller took; it never changes the model.
+ *
+ * @param {Record<string, any>|null|undefined} decision
+ * @param {string} model
+ * @returns {string[]}
+ */
+function optionRoles(decision, model) {
+  const options = Array.isArray(decision && decision.options) ? decision.options : [];
+  const option = options.find((candidate) => candidate && candidate.id === model);
+  return option && Array.isArray(option.roles) ? [...option.roles] : [];
+}
+
+/**
  * Resolve the model a dispatch will run on.
  *
  * - No caller model and a concrete stored model: respect the pin. The worker
  *   gets no `--model` at all, so it runs exactly what the task was queued with.
  * - No caller model and a stored `auto` (or none), or an explicit `auto`:
- *   route through the routing core for the tier.
+ *   route through the routing core for the tier and take its `default`.
  * - An explicit caller model: validate it, and report the pin it replaces.
  *
+ * `chosenBy` and `roles` are the audit trail: who picked the model, and what
+ * the shortlist said about it at that moment.
+ *
  * @param {{ requested: string|null, storedModel: string|null|undefined, tier: string, deps: Record<string, any> }} input
- * @returns {{ model: string, passModel: boolean, overrode: string|null }}
+ * @returns {{ model: string, passModel: boolean, overrode: string|null, chosenBy: 'caller'|'pinned'|'auto', roles: string[] }}
  */
 function resolveDispatchModel({ requested, storedModel, tier, deps }) {
   const stored = typeof storedModel === 'string' && storedModel.trim() ? storedModel.trim() : null;
 
   if (requested === null && stored !== null && stored !== 'auto') {
     assertDispatchableModel(stored, deps);
-    return { model: stored, passModel: false, overrode: null };
+    return { model: stored, passModel: false, overrode: null, chosenBy: 'pinned', roles: [] };
   }
 
   if (requested === null || requested === 'auto') {
     const decision = deps.recommend({ tier });
-    const choice = decision && decision.choice;
-    if (!choice || typeof choice.id !== 'string' || choice.id === '') {
+    const fallback = decision && decision.default;
+    if (!fallback || typeof fallback.id !== 'string' || fallback.id === '') {
       const reasons = summarizeRejections(Array.isArray(decision?.rejected) ? decision.rejected : []);
       throw new Error(`no eligible model for tier "${tier}": ${reasons || 'no runnable models configured'}`);
     }
-    return { model: choice.id, passModel: true, overrode: null };
+    return {
+      model: fallback.id,
+      passModel: true,
+      overrode: null,
+      chosenBy: 'auto',
+      roles: optionRoles(decision, fallback.id),
+    };
   }
 
   assertDispatchableModel(requested, deps);
   const overrode = stored !== null && stored !== 'auto' && stored !== requested ? stored : null;
-  return { model: requested, passModel: true, overrode };
+  // The caller's pick is respected as-is; the shortlist is read only to log
+  // which option (if any) the caller took. A routing failure must not block a
+  // dispatch the caller already validated, so it degrades to no roles.
+  let roles = [];
+  try {
+    roles = optionRoles(deps.recommend({ tier }), requested);
+  } catch {
+    roles = [];
+  }
+  return { model: requested, passModel: true, overrode, chosenBy: 'caller', roles };
 }
 
 /**
@@ -308,6 +343,9 @@ function resolveDispatchModel({ requested, storedModel, tier, deps }) {
  * @property {() => any[]} getCatalog
  * @property {() => any[]} getCapacity
  * @property {(options: Record<string, any>) => any} recommend
+ * @property {(taskId: string, event: string, payload: Record<string, any>) => void} recordTaskEvent
+ *   The queue's event helper (src/queue/db-tasks.js `createTaskEvent`), injected so this module
+ *   never opens a database.
  * @property {(id: string) => Array<{ id: string, status: string }>} blockingDependencies
  * @property {() => Array<{ id: string, claimed_by: string }>} dispatchWorkers
  * @property {() => string[]} localTaskSources sources the local worker owns (attempt-budget exemption)
@@ -337,7 +375,7 @@ function resolveDispatchModel({ requested, storedModel, tier, deps }) {
  */
 function buildDispatchTools(deps) {
   if (!deps || typeof deps !== 'object') throw new TypeError('buildDispatchTools requires a deps object');
-  for (const key of ['getTask', 'getCatalog', 'getCapacity', 'recommend', 'blockingDependencies', 'dispatchWorkers', 'localTaskSources', 'spawn']) {
+  for (const key of ['getTask', 'getCatalog', 'getCapacity', 'recommend', 'recordTaskEvent', 'blockingDependencies', 'dispatchWorkers', 'localTaskSources', 'spawn']) {
     if (typeof (/** @type {any} */ (deps)[key]) !== 'function') {
       throw new TypeError(`buildDispatchTools: deps.${key} must be a function`);
     }
@@ -566,6 +604,20 @@ function buildDispatchTools(deps) {
         if (child && typeof child.unref === 'function') child.unref();
 
         workers.set(id, record);
+        // Audit how the model was chosen. The worker is already running, so a
+        // store failure is reported and never turns a dispatch into an error:
+        // the log and the response still say what was started.
+        try {
+          deps.recordTaskEvent(id, 'model-chosen', {
+            model: resolved.model,
+            chosenBy: resolved.chosenBy,
+            roles: resolved.roles,
+          });
+        } catch (error) {
+          process.stderr.write(
+            `agentq-mcp: could not record the model choice for ${id}: ${error?.message ?? error}\n`,
+          );
+        }
         const response = {
           dispatched: true,
           id,
@@ -680,6 +732,7 @@ module.exports = {
   buildDispatchTools,
   parseDispatchFlags,
   resolveDispatchModel,
+  optionRoles,
   assertDispatchableModel,
   dispatchWorkerId,
   dispatchClaimPrefix,

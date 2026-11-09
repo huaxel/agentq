@@ -12,7 +12,7 @@ const {
   runVerify,
 } = require('../../runners/execute.js');
 const { jobWorktreePath } = require('../../queue/job-state.js');
-const { coverageIssues, getCatalog, getCapacity, recommend, resolvePaths } = require('../../core/snapshot.js');
+const { coverageIssues, recommend, resolvePaths } = require('../../core/snapshot.js');
 const { degradedMarkers } = require('../../core/routing.js');
 const { loadPathHealthFile } = require('../../queue/path-health.js');
 const { refreshQuotaIfStale } = require('../../lib/quota-refresh.js');
@@ -29,6 +29,7 @@ const {
   buildModelRows,
   formatModelRow,
   formatModelTable,
+  formatOptionsTable,
   truncateRepo,
   formatCost,
   formatJobBlock,
@@ -539,22 +540,24 @@ async function commandPick(global, options) {
   // routing cannot repair. `npm run verify` fails on it; here it is a warning
   // so a pick still returns the best decision it can.
   for (const issue of coverageIssues(snapshotArgs)) process.stderr.write(`coverage: ${issue}\n`);
-  const catalog = getCatalog(snapshotArgs);
-  const capacity = new Map(getCapacity(snapshotArgs).map(entry => [entry.path, entry]));
   const decision = recommend({ ...snapshotArgs, tier, pathHealth: loadPathHealthFile(global.db) });
   if (options.json) {
     print({ tier, ...decision }, true);
-    return decision.choice ? 0 : 1;
+    return decision.default ? 0 : 1;
   }
-  process.stdout.write(`${formatModelTable({ catalog, capacity, decision, title: `models (tier ${tier})` })}\n`);
-  for (const marker of degradedMarkers(decision.choices)) {
-    process.stdout.write(`degraded: ${marker.path} (${marker.reason})\n`);
+  // The shortlist, not the whole catalog: the caller weighs a few options and
+  // picks. `default` is only what "auto" would take, so it is a footnote.
+  if (decision.options.length) {
+    process.stdout.write(`${formatOptionsTable(decision.options, { title: `options (tier ${tier})` })}\n`);
+    for (const marker of degradedMarkers(decision.options)) {
+      process.stdout.write(`degraded: ${marker.path} (${marker.reason})\n`);
+    }
   }
-  if (decision.choice) {
-    process.stdout.write(`auto → ${decision.choice.id} (${decision.choice.path})\n`);
+  if (decision.default) {
+    process.stdout.write(`default → ${decision.default.id} (${decision.default.path})\n`);
     return 0;
   }
-  process.stdout.write(`auto → no eligible model: ${summarizeRejections(decision.rejected)}\n`);
+  process.stdout.write(`default → no eligible model: ${summarizeRejections(decision.rejected)}\n`);
   return 1;
 }
 

@@ -87,9 +87,9 @@ test('pick reads runnables, scores, quota and subscriptions from the temp home',
   const result = run(['pick', '--json'], fixture.env());
   assert.equal(result.exitCode, 0, result.stderr);
   const picked = JSON.parse(result.stdout);
-  assert.equal(picked.choice.id, CHEAP_MODEL);
-  assert.equal(picked.choice.path, 'mistral');
-  assert.equal(picked.choice.subscriptionState, 'active');
+  assert.equal(picked.default.id, CHEAP_MODEL);
+  assert.equal(picked.default.path, 'mistral');
+  assert.equal(picked.default.subscriptionState, 'active');
 });
 
 test('status opens the queue inside the temp home', () => {

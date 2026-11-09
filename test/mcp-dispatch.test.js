@@ -79,14 +79,22 @@ function trustedTask(overrides = {}) {
  */
 function fakeDeps(overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentq-dispatch-'));
-  const calls = { spawn: [], recommend: [], blocking: [], workers: 0 };
+  const calls = { spawn: [], recommend: [], blocking: [], workers: 0, events: [] };
   const deps = {
     getTask: () => trustedTask(),
     getCatalog: () => CATALOG,
     getCapacity: () => CAPACITY,
     recommend: (options) => {
       calls.recommend.push(options);
-      return { choice: { id: 'gpt-5', path: 'codex' }, choices: [{ id: 'gpt-5' }], rejected: [] };
+      return {
+        options: [{ id: 'gpt-5', path: 'codex', roles: ['cheapest', 'smartest'] }],
+        default: { id: 'gpt-5', path: 'codex' },
+        choices: [{ id: 'gpt-5' }],
+        rejected: [],
+      };
+    },
+    recordTaskEvent: (taskId, event, payload) => {
+      calls.events.push({ taskId, event, payload });
     },
     blockingDependencies: (id) => {
       calls.blocking.push(id);
@@ -309,7 +317,8 @@ test('dispatch_task refuses "auto" when routing finds no eligible model, with re
   const { deps } = fakeDeps({
     getTask: () => trustedTask({ model: 'auto' }),
     recommend: () => ({
-      choice: null,
+      options: [],
+      default: null,
       choices: [],
       rejected: [
         { id: 'gpt-5', reasons: ['intelligence 20 below floor 38'] },
@@ -413,6 +422,70 @@ test('dispatch_task reports the pin an explicit model overrides', () => {
 test('dispatch_task refuses a pinned model that is no longer dispatchable', () => {
   const { deps } = fakeDeps({ getTask: () => trustedTask({ model: 'old-model' }) });
   assert.throws(() => tool('dispatch_task', deps).handler({ id: 't1' }), /subscription ended/);
+});
+
+// --- dispatch_task: model-choice audit ---
+
+test('dispatch_task records how the model was chosen, with its shortlist roles', () => {
+  // Pinned: the task already names a model, so nothing is routed.
+  const pinned = fakeDeps();
+  tool('dispatch_task', pinned.deps).handler({ id: 't1' });
+  assert.deepEqual(pinned.calls.events, [{
+    taskId: 't1',
+    event: 'model-chosen',
+    payload: { model: 'gpt-5', chosenBy: 'pinned', roles: [] },
+  }]);
+  assert.equal(pinned.calls.recommend.length, 0, 'a pin is not re-routed');
+
+  // Caller: an explicit model overrides the pin. Off the shortlist: no roles.
+  const caller = fakeDeps();
+  tool('dispatch_task', caller.deps).handler({ id: 't1', model: 'unscored-model' });
+  assert.deepEqual(caller.calls.events[0].payload, {
+    model: 'unscored-model', chosenBy: 'caller', roles: [],
+  });
+
+  // Caller picks an option from the shortlist: its roles are logged.
+  const fromList = fakeDeps({ getTask: () => trustedTask({ model: 'auto' }) });
+  tool('dispatch_task', fromList.deps).handler({ id: 't1', model: 'gpt-5' });
+  assert.deepEqual(fromList.calls.events[0].payload, {
+    model: 'gpt-5', chosenBy: 'caller', roles: ['cheapest', 'smartest'],
+  });
+
+  // A routing failure never blocks a caller-chosen dispatch.
+  const broken = fakeDeps({ recommend: () => { throw new Error('no catalog'); } });
+  tool('dispatch_task', broken.deps).handler({ id: 't1', model: 'gpt-5' });
+  assert.deepEqual(broken.calls.events[0].payload, {
+    model: 'gpt-5', chosenBy: 'caller', roles: [],
+  });
+
+  // Auto: the routing core decides, and its shortlist says what the model is for.
+  const auto = fakeDeps({ getTask: () => trustedTask({ model: 'auto' }) });
+  tool('dispatch_task', auto.deps).handler({ id: 't1', tier: 'big' });
+  assert.deepEqual(auto.calls.events[0].payload, {
+    model: 'gpt-5', chosenBy: 'auto', roles: ['cheapest', 'smartest'],
+  });
+});
+
+test('dispatch_task reports a store failure instead of failing a running dispatch', () => {
+  const { deps } = fakeDeps({
+    recordTaskEvent: () => {
+      throw new Error('database is locked');
+    },
+  });
+  const written = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  let result;
+  try {
+    result = tool('dispatch_task', deps).handler({ id: 't1' });
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.equal(result.dispatched, true, 'the worker is already running');
+  assert.match(written.join(''), /could not record the model choice for t1: database is locked/);
 });
 
 // --- dispatch_task: spawn ---

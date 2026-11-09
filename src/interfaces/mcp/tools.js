@@ -82,6 +82,34 @@ function withHealth(deps, args, health) {
 }
 
 /**
+ * The routed answer both recommend tools return.
+ *
+ * A shortlist is the point: a caller cannot weigh the full ranked list, and the
+ * arrays dominate the payload. `default` is what "auto" would take, not a
+ * verdict. The full `choices`/`rejected` arrays stay available behind
+ * `verbose`, so the shortlist never hides the reason a model was rejected.
+ *
+ * @param {Record<string, any>} result routing core output (src/core/snapshot.js)
+ * @param {{ verbose?: boolean, degraded?: any[] }} [input]
+ * @returns {Record<string, any>}
+ */
+function routedResponse(result, { verbose = false, degraded = [] } = {}) {
+  const rejected = Array.isArray(result.rejected) ? result.rejected : [];
+  const response = {
+    options: Array.isArray(result.options) ? result.options : [],
+    default: result.default ?? null,
+    rejectedCount: rejected.length,
+    policy: result.policy ?? null,
+  };
+  if (verbose) {
+    response.choices = Array.isArray(result.choices) ? result.choices : [];
+    response.rejected = rejected;
+  }
+  if (degraded.length) response.pathHealth = degraded;
+  return response;
+}
+
+/**
  * Build the read-only tool set.
  * @param {ToolDeps} deps
  * @returns {import('./protocol.js').McpTool[]}
@@ -203,9 +231,12 @@ function buildReadTools(deps) {
       name: 'recommend_model',
       description:
         'Rank runnable models for a task need using the routing core: catalog scores plus live '
-        + 'capacity. Returns the routing decision verbatim (choice, ordered choices, rejected '
-        + 'candidates with reasons, and the policy applied). Advisory only: it does not enqueue '
-        + 'or dispatch anything.',
+        + 'capacity. Returns a shortlist of options with their trade-offs: each option names the '
+        + 'roles it plays (cheapest, smartest, expiring, best-value, alternative) with its '
+        + 'intelligence, cost per MTok, headroom and reset time. The caller chooses and passes the '
+        + 'chosen id to dispatch_task as `model`. `default` is what "auto" would pick. Pass '
+        + 'verbose: true for the full ranked choices and the rejected candidates with reasons. '
+        + 'Advisory only: it does not enqueue or dispatch anything.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -225,31 +256,39 @@ function buildReadTools(deps) {
             default: false,
             description: 'Allow paths whose capacity state is unknown to be recommended.',
           },
+          verbose: {
+            type: 'boolean',
+            default: false,
+            description: 'Also return the full ranked choices and the rejected candidates with reasons.',
+          },
         },
         additionalProperties: false,
       },
       annotations: { readOnlyHint: true },
       handler(args) {
-        assertKnownArgs(args, ['tier', 'min_intelligence', 'allow_unknown_capacity']);
+        assertKnownArgs(args, ['tier', 'min_intelligence', 'allow_unknown_capacity', 'verbose']);
         const tier = optionalEnum(args, 'tier', TIERS) ?? 'medium';
         const minIntelligence = optionalNumber(args, 'min_intelligence', { min: 0 });
         const allowUnknownCapacity = optionalBoolean(args, 'allow_unknown_capacity') ?? false;
+        const verbose = optionalBoolean(args, 'verbose') ?? false;
         const health = readHealth(deps);
         const result = deps.recommend(withHealth(deps, { tier, minIntelligence, allowUnknownCapacity }, health));
         if (!result || typeof result !== 'object') throw new Error('routing core returned no recommendation');
-        const degraded = degradedEntries(health);
-        if (!degraded.length) return result;
-        return { ...result, pathHealth: degraded };
+        return routedResponse(result, { verbose, degraded: degradedEntries(health) });
       },
     },
     {
       name: 'recommend_for_task',
       description:
         'Read-only routing recommendation for one queued task. When the task stores model "auto" '
-        + '(or no model) this returns the routing core decision for the requested tier. When the '
-        + 'task pins an explicit model this returns that model\'s catalog entry, its execution '
-        + 'path\'s capacity state, and whether it is currently eligible. Advisory only: it does not '
-        + 'claim, dispatch, or change the task.',
+        + '(or no model) this returns a shortlist of options with their trade-offs for the '
+        + 'requested tier: each option names the roles it plays (cheapest, smartest, expiring, '
+        + 'best-value, alternative). The caller chooses and passes the chosen id to dispatch_task '
+        + 'as `model`. `default` is what "auto" would pick. Pass verbose: true for the full ranked '
+        + 'choices and the rejected candidates with reasons. When the task pins an explicit model '
+        + 'this returns that model\'s catalog entry, its execution path\'s capacity state, and '
+        + 'whether it is currently eligible. Advisory only: it does not claim, dispatch, or change '
+        + 'the task.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -260,15 +299,21 @@ function buildReadTools(deps) {
             default: 'medium',
             description: 'Task size tier to route for when the task model is "auto". Defaults to medium.',
           },
+          verbose: {
+            type: 'boolean',
+            default: false,
+            description: 'Also return the full ranked choices and the rejected candidates with reasons.',
+          },
         },
         required: ['id'],
         additionalProperties: false,
       },
       annotations: { readOnlyHint: true },
       handler(args) {
-        assertKnownArgs(args, ['id', 'tier']);
+        assertKnownArgs(args, ['id', 'tier', 'verbose']);
         const id = requiredString(args, 'id', { max: 128 });
         const tier = optionalEnum(args, 'tier', TIERS) ?? 'medium';
+        const verbose = optionalBoolean(args, 'verbose') ?? false;
         const task = deps.getTask(id);
         if (!task) throw new Error(`Task not found: ${id}`);
 
@@ -277,9 +322,12 @@ function buildReadTools(deps) {
           const health = readHealth(deps);
           const result = deps.recommend(withHealth(deps, { tier, minIntelligence: undefined, allowUnknownCapacity: false }, health));
           if (!result || typeof result !== 'object') throw new Error('routing core returned no recommendation');
-          const degraded = degradedEntries(health);
-          if (!degraded.length) return { task: summarizeTask(task), mode: 'routed', tier, ...result };
-          return { task: summarizeTask(task), mode: 'routed', tier, ...result, pathHealth: degraded };
+          return {
+            task: summarizeTask(task),
+            mode: 'routed',
+            tier,
+            ...routedResponse(result, { verbose, degraded: degradedEntries(health) }),
+          };
         }
 
         const catalog = deps.getCatalog();

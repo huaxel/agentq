@@ -187,7 +187,7 @@ function getCapacity(opts = {}) {
  * interface only supplies routing policy.
  *
  * @param {SnapshotOptions & RecommendArgs} [args]
- * @returns {{ choice: import('./routing.js').RankedChoice|null, choices: import('./routing.js').RankedChoice[], rejected: import('./routing.js').RankedChoice[], policy: { floor: number, order: string[] } }}
+ * @returns {{ options: ReturnType<typeof import('./shortlist.js').shortlist>, default: import('./routing.js').RankedChoice|null, choices: import('./routing.js').RankedChoice[], rejected: import('./routing.js').RankedChoice[], policy: { floor: number, order: string[] } }}
  */
 function recommend(args = {}) {
   return rankAndRecommend({

@@ -175,7 +175,11 @@ test('recommend builds catalog and capacity itself and returns the full decision
   const root = fixtureRoot({ roi: ROI, quota: QUOTA });
   const result = recommend({ home: root, now: NOW, tier: 'big' });
 
-  assert.equal(result.choice.id, 'a-model');
+  // `default` is the old `choice`: the head of the ranked list, kept only so an
+  // "auto" dispatch has something to run on.
+  assert.equal(result.default.id, 'a-model');
+  assert.deepEqual(result.default, result.choices[0]);
+  assert.deepEqual(result.options.map((option) => option.id), ['a-model']);
   assert.deepEqual(result.choices.map((choice) => choice.id), ['a-model']);
   assert.equal(result.policy.floor, 45);
   assert.deepEqual(
@@ -198,10 +202,11 @@ test('recommend passes the policy flags through to routing', () => {
   assert.equal(permissive.policy.floor, 10);
 });
 
-test('recommend with no usable data returns a null choice and explains why', () => {
+test('recommend with no usable data returns a null default and explains why', () => {
   const root = fixtureRoot({});
   const result = recommend({ home: root, now: NOW, tier: 'medium' });
-  assert.equal(result.choice, null);
+  assert.equal(result.default, null);
+  assert.deepEqual(result.options, []);
   assert.deepEqual(result.choices, []);
   assert.equal(result.rejected.length, 3);
 });
@@ -337,7 +342,7 @@ test('recommend rejects runnables whose subscription ended or is not configured'
     roiConfig: { paths: [{ id: 'codex', type: 'Wallet', fee: 20, startDate: '20260101', endDate: '20260901' }] },
   });
   const decision = recommend({ home: ended, now: NOW, tier: 'small' });
-  assert.equal(decision.choice, null);
+  assert.equal(decision.default, null);
   const codex = decision.rejected.find((r) => r.id === 'a-model');
   assert.equal(codex?.subscriptionState, 'ended');
   assert.match(codex?.reasons[0] ?? '', /subscription ended \(codex ended 2026-09-01\)/);

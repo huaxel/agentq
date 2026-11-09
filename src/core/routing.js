@@ -15,6 +15,7 @@
  */
 
 const { capacityFor } = require('./capacity.js');
+const { shortlist } = require('./shortlist.js');
 
 /**
  * genIntel floors per tier. Tunable: these are product judgement, not physics.
@@ -267,12 +268,25 @@ function degradedMarkers(choices = []) {
 }
 
 /**
+ * Rank, then narrow the result to a shortlist of options.
+ *
+ * `options` is what a caller reasons about: a few choices that differ along
+ * the axes that matter (src/core/shortlist.js). `default` is deliberately NOT
+ * a decision — it is what "auto" would take, kept so an automatic dispatch has
+ * something to run on. `choices` and `rejected` stay for inspection.
+ *
  * @param {Parameters<typeof rank>[0]} [args]
- * @returns {{ choice: RankedChoice|null, choices: RankedChoice[], rejected: RankedChoice[], policy: { floor: number, order: string[] } }}
+ * @returns {{ options: ReturnType<typeof shortlist>, default: RankedChoice|null, choices: RankedChoice[], rejected: RankedChoice[], policy: { floor: number, order: string[] } }}
  */
 function recommend(args) {
   const { choices, rejected, policy } = rank(args);
-  return { choice: choices.length ? choices[0] : null, choices, rejected, policy };
+  return {
+    options: shortlist(choices),
+    default: choices.length ? choices[0] : null,
+    choices,
+    rejected,
+    policy,
+  };
 }
 
 module.exports = { TIER_FLOORS, ORDER, DEGRADED_REASON_PREFIX, intelligenceText, degradedMarkers, rank, recommend };

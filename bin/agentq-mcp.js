@@ -268,11 +268,11 @@ const writeDeps = {
   captureIssueInput,
   resolveAutoModel: (tier) => {
     const recommendation = recommendWithHealth({ tier });
-    const choice = recommendation && recommendation.choice;
-    if (!choice || typeof choice.id !== 'string') {
+    const fallback = recommendation && recommendation.default;
+    if (!fallback || typeof fallback.id !== 'string') {
       throw new Error(`no eligible model for tier "${tier}"`);
     }
-    return { model: choice.id, provider: choice.path ?? null };
+    return { model: fallback.id, provider: fallback.path ?? null };
   },
 };
 
@@ -307,6 +307,11 @@ function main(argv) {
     getCapacity: () => coreFunction('getCapacity')(),
     recommend: recommendWithHealth,
     getPathHealth: () => pathHealthStore().loadPathHealth(taskDbHandle()),
+    // The queue's own event helper: one row per transition, so a later "why did
+    // this run on that model?" is answered from the audit trail.
+    recordTaskEvent: (taskId, event, payload) => withWriteTaskDb(
+      (db) => taskStore().createTaskEvent(db, taskId, event, payload),
+    ),
     blockingDependencies: (id) => withTaskDb((db) => taskStore().blockingDependencies(db, id)),
     // Only THIS host's dispatch claims count: another machine's workers are
     // not this server's concurrency budget.
