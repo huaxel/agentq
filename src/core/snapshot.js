@@ -94,16 +94,13 @@ function resolvePaths(opts = {}) {
 }
 
 /**
- * The Pro snapshot wins when it exists: it is a superset of the Free body for
- * the fields used here, and `aa-sync` writes both tiers separately. A missing
- * Pro file falls back to the Free one.
+ * `aa-sync` writes the Free catalog here; there is no other tier.
  *
  * @param {string} home
  * @returns {string}
  */
 function defaultAaSnapshotPath(home) {
-  const pro = path.join(home, 'data', 'aa-snapshot-pro.json');
-  return fs.existsSync(pro) ? pro : path.join(home, 'data', 'aa-snapshot.json');
+  return path.join(home, 'data', 'aa-snapshot.json');
 }
 
 /**

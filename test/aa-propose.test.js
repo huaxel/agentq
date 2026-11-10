@@ -18,7 +18,7 @@ const propose = require('../src/roi-tracker/collect/aa-propose.js');
 const { readJson } = require('../src/lib/load.js');
 const {
   freePages,
-  proPage,
+  extraEvaluationsPage,
   page,
   freeModel,
   previewPage,
@@ -31,16 +31,13 @@ const ROOT = path.join(__dirname, '..');
 // partitionMap is a method key: it lives in the tracked defaults.
 const PARTITIONS = readJson(path.join(ROOT, 'config', 'defaults', 'roi.json')).partitionMap;
 const FREE_URL = 'https://artificialanalysis.ai/api/v2/language/models/free';
-const PRO_URL = 'https://artificialanalysis.ai/api/v2/language/models';
 
 const BENCHMARK_FIELDS = ['terminalBench', 'sciCode', 'aaLcr', 'hle', 'gpqa', 'critPt'];
 
 function snapshotOf(pages) {
   const models = pages.flatMap(p => p.data);
-  const tier = pages[0].tier ?? 'free';
   return aa.buildSnapshot({
-    access: tier,
-    endpoint: tier === 'pro' ? PRO_URL : FREE_URL,
+    endpoint: FREE_URL,
     intelligenceIndexVersion: pages[0].intelligence_index_version,
     pageCount: pages.length,
     models,
@@ -51,12 +48,11 @@ function target(model, modelKey, row = null, runnable = null) {
   return { model, modelKey, row, runnable };
 }
 
-function proposeFor(model, modelKey, { snapshot = snapshotOf(freePages()), row = null, includeBenchmarks = false } = {}) {
+function proposeFor(model, modelKey, { snapshot = snapshotOf(freePages()), row = null } = {}) {
   return propose.proposeOne({
     target: target(model, modelKey, row),
     snapshot,
     partitionMap: PARTITIONS,
-    includeBenchmarks,
   });
 }
 
@@ -177,43 +173,24 @@ test('registry mapping matches the gs importer column for column', () => {
   }
 });
 
-test('per-benchmark fields are refused by default: they are not importer parity', () => {
-  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: snapshotOf([proPage()]) });
+test('the six per-benchmark columns are never proposed, even when the body carries them', () => {
+  // The fixture holds terminalbench_v2_1, hle, gpqa_diamond and friends, so this
+  // proves the omission is policy, not an accident of the Free body.
+  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: snapshotOf([extraEvaluationsPage()]) });
 
-  const nulled = Object.fromEntries(proposal.nulled.map(n => [n.field, n]));
+  const absent = Object.fromEntries(proposal.absent.map(a => [a.field, a.reason]));
   for (const field of BENCHMARK_FIELDS) {
-    assert.ok(nulled[field], `${field} must be reported as refused`);
-    assert.equal(nulled[field].reason, propose.BENCHMARK_UNVERIFIED);
-    assert.match(nulled[field].reason, /not in importer/);
+    assert.equal(absent[field], propose.BENCHMARKS_UNSOURCED, field);
     assert.equal(proposal.proposed[field], null, `${field} must stay null`);
     assert.ok(!proposal.fills.some(f => f.field === field), `${field} must not be filled`);
   }
-  // The value is still reported, so a reviewer can see what was declined.
-  assert.equal(nulled.terminalBench.aaValue, 83.9);
-  assert.deepEqual(proposal.unverified, []);
-  assert.match(propose.renderProposal(proposal), /refuse: terminalBench \(AA 83\.9\) — not in importer/);
-});
+  assert.match(propose.renderProposal(proposal), /absent: terminalBench, sciCode, aaLcr, hle, gpqa, critPt — AA publishes no per-benchmark evaluations/);
+  // Nothing is written for them either.
+  const applied = propose.applyProposals({ models: [] }, [proposal], { confirmMatch: ['claude-opus-5-5'] });
+  for (const field of BENCHMARK_FIELDS) assert.equal(applied.models[0][field], null, field);
 
-test('--include-benchmarks proposes them and warns per field', () => {
-  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', {
-    snapshot: snapshotOf([proPage()]),
-    includeBenchmarks: true,
-  });
-
-  assert.equal(proposal.proposed.terminalBench, 83.9);
-  assert.equal(proposal.proposed.sciCode, 59);
-  assert.equal(proposal.proposed.aaLcr, 79.7);
-  assert.equal(proposal.proposed.hle, 42.3);
-  assert.equal(proposal.proposed.gpqa, 91.7);
-  assert.equal(proposal.proposed.critPt, 19.1);
-  assert.deepEqual(proposal.unverified.map(u => u.field).sort(), [...BENCHMARK_FIELDS].sort());
-  for (const entry of proposal.unverified) assert.equal(entry.reason, propose.BENCHMARK_UNVERIFIED);
-
-  const report = propose.renderProposal(proposal);
-  assert.match(report, /UNVERIFIED mapping: terminalBench ← evaluations\.terminalbench_v2_1 \(x100\)/);
-  assert.match(report, /UNVERIFIED mapping: gpqa ← evaluations\.gpqa_diamond \(x100\)/);
-
-  // Prices are already USD per 1M tokens in AA; the gs importer does not rescale.
+  // The fields AA can source are still proposed, and prices are already USD per
+  // 1M tokens; the gs importer does not rescale.
   assert.equal(proposal.proposed.inputPrice, 4);
   assert.equal(proposal.proposed.outputPrice, 20);
   assert.equal(proposal.proposed.cachePrice, 0.5);
@@ -223,10 +200,7 @@ test('--include-benchmarks proposes them and warns per field', () => {
 });
 
 test('fields the backlog marks unsafe are refused even when AA has a number', () => {
-  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', {
-    snapshot: snapshotOf([proPage()]),
-    includeBenchmarks: true,
-  });
+  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: snapshotOf([extraEvaluationsPage()]) });
 
   const nulled = Object.fromEntries(proposal.nulled.map(n => [n.field, n]));
   assert.equal(nulled.gdpval.aaValue, 57.9);
@@ -244,45 +218,41 @@ test('fields the backlog marks unsafe are refused even when AA has a number', ()
   }
 });
 
-test('a Free snapshot explains that the tier, not the model, is why benchmarks are absent', () => {
-  // A Pro body carries the evaluations, so nothing is missing there.
-  const pro = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', {
-    snapshot: snapshotOf([proPage()]),
-    includeBenchmarks: true,
-  });
-  assert.deepEqual(pro.absent.filter(a => a.reason === propose.FREE_TIER), []);
+test('a variant-qualified AA row says so when its index is proposed', () => {
+  // AA lists one row per variant; the registry column is model-level.
+  assert.equal(propose.variantOf('Claude Sonnet 4.6 (Non-reasoning, High)'), 'Non-reasoning, High');
+  assert.equal(propose.variantOf('GPT-5.6 Terra (Max)'), 'Max');
+  assert.equal(propose.variantOf('MiniMax-M3'), null);
+  assert.equal(propose.variantOf('DeepSeek V4 Pro 0813 (Max)'), 'Max');
 
-  // A Free body has no per-benchmark evaluations at all: say so, and say how to
-  // get them, instead of implying the model is unmeasured.
-  const free = proposeFor('xai/grok-4.6', 'grok-4-6', { includeBenchmarks: true });
-  const absent = Object.fromEntries(free.absent.map(a => [a.field, a.reason]));
-  for (const field of BENCHMARK_FIELDS) assert.equal(absent[field], propose.FREE_TIER, field);
-  assert.match(propose.renderProposal(free), /run npm run aa-sync -- --pro/);
+  const variant = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: snapshotOf([extraEvaluationsPage()]) });
+  assert.equal(variant.match.variant, 'max');
+  assert.match(propose.renderProposal(variant), /the AA row is the "max" variant/);
+
+  // No qualifier, no caveat.
+  const plain = proposeFor('xai/grok-4.6', 'grok-4-6');
+  assert.equal(plain.match.variant, null);
+  assert.doesNotMatch(propose.renderProposal(plain), /variant/);
 });
 
 // --- completeness --------------------------------------------------------
 
 test('completeness uses the score.js partition rule, not a field count', () => {
-  const proSnapshot = snapshotOf([proPage()]);
+  const snapshot = snapshotOf([extraEvaluationsPage()]);
 
-  // Without --include-benchmarks nothing reaches the partitions.
-  const refused = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: proSnapshot });
-  assert.equal(refused.completeAfter, false);
-  assert.deepEqual(refused.missingPartitions, ['agents', 'coding', 'general', 'scientific']);
-
-  // With it, only the agents partition is still missing.
-  const included = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: proSnapshot, includeBenchmarks: true });
-  assert.equal(included.completeAfter, false);
-  assert.deepEqual(included.missingPartitions, ['agents']);
+  // AA cannot fill a single benchmark column, so every partition stays missing.
+  const empty = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot });
+  assert.equal(empty.completeAfter, false);
+  assert.deepEqual(empty.missingPartitions, ['agents', 'coding', 'general', 'scientific']);
 
   // A row that already satisfies all four partitions stays complete, and every
   // AA value it already has is kept rather than replaced.
   const existing = { ...completeRow('anthropic/claude-opus-5-5'), tau3Banking: 34.64 };
-  const complete = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: proSnapshot, row: existing, includeBenchmarks: true });
+  const complete = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot, row: existing });
   assert.equal(complete.completeBefore, true);
   assert.equal(complete.completeAfter, true);
   assert.deepEqual(complete.missingPartitions, []);
-  assert.deepEqual(complete.fills.map(f => f.field).sort(), ['aaSlug', 'critPt']);
+  assert.deepEqual(complete.fills.map(f => f.field).sort(), ['aaSlug']);
   assert.equal(complete.proposed.terminalBench, 50);
   assert.equal(complete.proposed.tau3Banking, 34.64);
 });
@@ -330,6 +300,54 @@ test('a folded slug match is flagged and --write refuses it without --confirm-ma
   const confirmed = propose.applyProposals(registry, [proposal], { confirmMatch: ['mistral-large-4'] });
   assert.equal(confirmed.changes[0].action, 'created');
   assert.equal(confirmed.models[0].model, 'mistral/mistral-large-4-preview');
+});
+
+test('the printed --confirm-match hint is the key that actually unblocks the write', () => {
+  // A folded match is named from the AA row, so the hint must not be the
+  // derived row name's key: the gate checks the target key.
+  const dir = tempDir();
+  const snapshotPath = path.join(dir, 'aa-snapshot.json');
+  const registryPath = path.join(dir, 'benchmark-inputs.json');
+  const runnablesPath = path.join(dir, 'runnables.json');
+  const previewOnly = snapshotOf([page([freeModel({
+    id: 'id-preview', name: 'Mistral Large 4 Preview', slug: 'mistral-large-4-preview',
+    creator: { id: 'c', name: 'Mistral' }, input: 1, output: 3,
+  })])]);
+  fs.writeFileSync(snapshotPath, `${JSON.stringify(previewOnly, null, 2)}\n`);
+  fs.writeFileSync(registryPath, `${JSON.stringify({ models: [] }, null, 2)}\n`);
+  fs.writeFileSync(runnablesPath, `${JSON.stringify({
+    schemaVersion: 1,
+    runnables: [{ id: 'mistral/mistral-large-4', path: 'mistral', modelKey: null }],
+  }, null, 2)}\n`);
+
+  const lines = [];
+  const result = propose.runPropose({
+    models: ['mistral/mistral-large-4'],
+    write: true,
+    snapshotPath,
+    registryPath,
+    runnablesPath,
+    log: line => lines.push(line),
+  });
+
+  const hint = lines.join('\n').match(/pass --confirm-match (\S+) to write it/);
+  assert.ok(hint, 'the folded match must print a confirm hint');
+  assert.equal(hint[1], 'mistral-large-4');
+  assert.equal(result.written.changed.length, 0);
+  assert.deepEqual(readJson(registryPath).models, []);
+
+  // Following the printed instruction must now write the row.
+  const retried = propose.runPropose({
+    models: ['mistral/mistral-large-4'],
+    write: true,
+    confirmMatch: [hint[1]],
+    snapshotPath,
+    registryPath,
+    runnablesPath,
+    log: () => {},
+  });
+  assert.deepEqual(retried.written.changed.map(c => c.action), ['created']);
+  assert.equal(readJson(registryPath).models[0].model, 'mistral/mistral-large-4-preview');
 });
 
 test('an exact slug beats a slug that only folds to the same key', () => {
@@ -485,7 +503,7 @@ test('a model with no AA match never becomes an all-null registry row', () => {
   assert.deepEqual(proposal.fills, []);
   const applied = propose.applyProposals({ models: [completeRow('x-ai/grok-4.5')] }, [proposal]);
   assert.equal(applied.models.length, 1);
-  assert.deepEqual(applied.changes, [{ model: 'mistral/devstral-latest', action: 'skipped', fields: [] }]);
+  assert.deepEqual(applied.changes, [{ model: 'mistral/devstral-latest', key: 'devstral', action: 'skipped', fields: [] }]);
   assert.match(propose.renderProposal(proposal), /no AA row matched this model key/);
 });
 
@@ -589,8 +607,7 @@ test('runPropose --write fills nulls in a registry file and points at the pipeli
   assert.deepEqual(Object.keys(written.models[1]), propose.REGISTRY_FIELDS);
 
   const output = lines.join('\n');
-  assert.match(output, /snapshot: .*aa-snapshot\.json \(tier free/);
-  assert.match(output, /tier free: per-benchmark evaluations are unavailable/);
+  assert.match(output, /snapshot: .*aa-snapshot\.json \(4 models, Intelligence Index v4\.1/);
   assert.match(output, /npm run pipeline && npm run verify/);
   assert.match(output, /"id": "xai\/grok-4\.6", "modelKey": "grok-4-6"/);
   assert.deepEqual(result.updates, [
@@ -629,7 +646,7 @@ test('runPropose without a snapshot explains aa-sync', () => {
   );
 });
 
-test('--json emits proposals with the snapshot provenance and tier', () => {
+test('--json emits proposals with the snapshot provenance', () => {
   const dir = tempDir();
   const snapshotPath = path.join(dir, 'aa-snapshot.json');
   fs.writeFileSync(snapshotPath, `${JSON.stringify(snapshotOf(freePages()), null, 2)}\n`);
@@ -645,33 +662,25 @@ test('--json emits proposals with the snapshot provenance and tier', () => {
     log: line => printed.push(line),
   });
   const parsed = JSON.parse(printed.join('\n'));
-  assert.equal(parsed.snapshot.tier, 'free');
   assert.equal(parsed.snapshot.path, snapshotPath);
   assert.equal(parsed.snapshot.intelligenceIndexVersion, 4.1);
-  assert.equal(parsed.includeBenchmarks, false);
   assert.equal(parsed.proposals.length, 1);
   assert.equal(parsed.proposals[0].modelKey, 'grok-4-6');
   assert.equal(parsed.written, null);
 });
 
-test('the Pro snapshot is preferred when both exist', () => {
-  const dir = tempDir();
-  const free = path.join(dir, 'aa-snapshot.json');
-  const pro = path.join(dir, 'aa-snapshot-pro.json');
-  fs.writeFileSync(free, '{}');
-  assert.equal(propose.resolveSnapshotPath(null, { free, pro }), free);
-  fs.writeFileSync(pro, '{}');
-  assert.equal(propose.resolveSnapshotPath(null, { free, pro }), pro);
-  assert.equal(propose.resolveSnapshotPath('/tmp/explicit.json', { free, pro }), '/tmp/explicit.json');
+test('the snapshot path is the Free one unless --snapshot says otherwise', () => {
+  assert.equal(propose.resolveSnapshotPath(null), aa.freeSnapshotPath());
+  assert.equal(propose.resolveSnapshotPath('/tmp/explicit.json'), '/tmp/explicit.json');
 });
 
 test('parseArgs rejects unknown flags and parses the new options', () => {
   assert.deepEqual(propose.parseArgs(['--json', '--write']), {
-    models: null, json: true, write: true, includeBenchmarks: false, confirmMatch: [], snapshot: null, help: false,
+    models: null, json: true, write: true, confirmMatch: [], snapshot: null, help: false,
     prices: false, driftK: 2, confirmPrice: [],
   });
   assert.deepEqual(propose.parseArgs(['--models', 'a, b']).models, ['a', 'b']);
-  assert.equal(propose.parseArgs(['--include-benchmarks']).includeBenchmarks, true);
+  assert.throws(() => propose.parseArgs(['--include-benchmarks']), /unknown argument/);
   assert.deepEqual(propose.parseArgs(['--confirm-match', 'a,b', '--confirm-match', 'c']).confirmMatch, ['a', 'b', 'c']);
   assert.equal(propose.parseArgs(['--snapshot', 'tmp/s.json']).snapshot, path.resolve('tmp/s.json'));
   assert.throws(() => propose.parseArgs(['--models']), /needs a comma-separated list/);
@@ -694,14 +703,11 @@ test('parseArgs rejects unknown flags and parses the new options', () => {
 });
 
 test('the rendered report names fills, refusals, warnings and the missing partition', () => {
-  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', {
-    snapshot: snapshotOf([proPage()]),
-    includeBenchmarks: true,
-  });
+  const proposal = proposeFor('anthropic/claude-opus-5-5', 'claude-opus-5-5', { snapshot: snapshotOf([extraEvaluationsPage()]) });
   const report = propose.renderProposal(proposal);
   assert.match(report, /new row anthropic\/claude-opus-5-5/);
   assert.match(report, /fill:\s+aaSlug="claude-opus-5-5"/);
-  assert.match(report, /UNVERIFIED mapping: hle ← evaluations\.hle \(x100\)/);
+  assert.match(report, /absent: terminalBench, sciCode, aaLcr, hle, gpqa, critPt/);
   assert.match(report, /refuse: gdpval \(AA 57\.9\)/);
   assert.match(report, /scoring: incomplete — missing agents/);
 });

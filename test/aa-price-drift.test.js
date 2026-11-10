@@ -309,7 +309,6 @@ test('--json carries the snapshot provenance, the blend and the row shape', () =
   });
 
   const { report } = runJson({ snapshotPath, registryPath, configPath });
-  assert.equal(report.snapshot.tier, 'free');
   assert.equal(report.snapshot.path, snapshotPath);
   assert.equal(report.snapshot.generatedAt, '2026-11-09T00:00:00Z');
   assert.equal(report.snapshot.intelligenceIndexVersion, 4.1);

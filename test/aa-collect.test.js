@@ -7,16 +7,16 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 
 const aa = require('../src/roi-tracker/collect/aa.js');
-const { freePages, proPage, page, freeModel } = require('../testdata/aa-fixtures.js');
+const { freePages, page, freeModel } = require('../testdata/aa-fixtures.js');
 
 const FREE_URL = 'https://artificialanalysis.ai/api/v2/language/models/free';
-const PRO_URL = 'https://artificialanalysis.ai/api/v2/language/models';
 
 function fakeHttp(responses) {
   const calls = [];
@@ -76,7 +76,6 @@ test('crawls every page of the Free endpoint and keeps the raw records', async (
   assert.deepEqual(calls.map(c => c.url), [`${FREE_URL}?page=1`, `${FREE_URL}?page=2`]);
   assert.equal(calls[0].headers['x-api-key'], 'test-key');
   assert.equal(calls[0].headers.Accept, 'application/json');
-  assert.equal(result.access, 'free');
   assert.equal(result.endpoint, FREE_URL);
   assert.equal(result.intelligenceIndexVersion, 4.1);
   assert.equal(result.pageCount, 2);
@@ -86,25 +85,14 @@ test('crawls every page of the Free endpoint and keeps the raw records', async (
   assert.deepEqual(sleeps, [150]);
 });
 
-test('Pro is explicit opt-in, uses the non-free endpoint and its own snapshot', async () => {
-  const { http: httpImpl, calls } = fakeHttp([json(proPage())]);
-  const result = await aa.collectAll({ access: 'pro', apiKey: 'k', http: httpImpl, sleep: quietSleep() });
-  assert.equal(calls[0].url, `${PRO_URL}?page=1`);
-  assert.equal(result.access, 'pro');
-  assert.equal(result.endpoint, PRO_URL);
-
-  // The two tiers answer different questions, so they never share a file.
-  assert.equal(aa.defaultOut('free'), aa.freeSnapshotPath());
-  assert.equal(aa.defaultOut('pro'), aa.proSnapshotPath());
-  assert.notEqual(aa.freeSnapshotPath(), aa.proSnapshotPath());
-  assert.match(aa.proSnapshotPath(), /aa-snapshot-pro\.json$/);
-  assert.throws(() => aa.defaultOut('commercial'), /access must be one of/);
-});
-
-test('unknown access level fails before any request', async () => {
-  const { http: httpImpl, calls } = fakeHttp([]);
-  await assert.rejects(aa.collectAll({ access: 'commercial', apiKey: 'k', http: httpImpl }), /access must be one of/);
-  assert.equal(calls.length, 0);
+test('the Pro endpoint is not offered: there is no tier to choose', () => {
+  // A --pro flag would only ever return 403 with this project's key, so it is
+  // absent rather than advertised and broken.
+  assert.equal(aa.pageUrl(1), `${FREE_URL}?page=1`);
+  assert.match(aa.freeSnapshotPath(), /aa-snapshot\.json$/);
+  assert.equal(aa.proSnapshotPath, undefined);
+  assert.equal(aa.defaultOut, undefined);
+  assert.throws(() => aa.parseArgs(['--pro']), /unknown argument/);
 });
 
 test('a missing key never reaches the network', async () => {
@@ -210,7 +198,7 @@ test('retryDelayMs honours seconds, HTTP dates and the backoff fallback', () => 
 
 test('fetchPage has a usable default sleep', async () => {
   const { http: httpImpl } = fakeHttp([{ status: 429, headers: { 'Retry-After': '0' }, body: '' }, json(page([freeModel()]))]);
-  const payload = await aa.fetchPage({ page: 1, access: 'free', apiKey: 'k', http: httpImpl });
+  const payload = await aa.fetchPage({ page: 1, apiKey: 'k', http: httpImpl });
   assert.equal(payload.pagination.page, 1);
 });
 
@@ -319,6 +307,21 @@ test('the key file must be a regular file owned by this uid, opened with O_NOFOL
   fs.mkdirSync(dirFile, { recursive: true });
   assert.throws(() => aa.readApiKey({ env: dirEnv, home: dirHome }), /not a regular file/);
 
+  // A FIFO would block forever on open, so it is refused before the open.
+  const fifoHome = tempDir();
+  const fifoEnv = { XDG_CONFIG_HOME: path.join(fifoHome, 'xdg') };
+  const fifoFile = aa.keyFilePath({ env: fifoEnv, home: fifoHome });
+  fs.mkdirSync(path.dirname(fifoFile), { recursive: true });
+  try {
+    execFileSync('mkfifo', [fifoFile]);
+  } catch {
+    return; // mkfifo is unavailable here; the directory case covers isFile().
+  }
+  let opened = false;
+  const noOpen = { ...fs, openSync: (...args) => { opened = true; return fs.openSync(...args); } };
+  assert.throws(() => aa.readApiKey({ env: fifoEnv, home: fifoHome, fs: noOpen }), /not a regular file/);
+  assert.equal(opened, false, 'a FIFO must be refused before it is opened');
+
   // O_NOFOLLOW is requested and the key is read through the descriptor.
   let openedFlags = null;
   let readFrom = null;
@@ -361,7 +364,6 @@ test('runSync resolves the key first, then writes an atomic snapshot without the
   assert.equal(calls.length, 2);
   assert.equal(snapshot.schemaVersion, 1);
   assert.equal(snapshot.generatedAt, '2026-11-08T10:00:00.000Z');
-  assert.equal(snapshot.source.tier, 'free');
   assert.equal(snapshot.source.endpoint, FREE_URL);
   assert.equal(snapshot.modelCount, 4);
   assert.equal(snapshot.pageCount, 2);
@@ -394,7 +396,7 @@ test('a missing snapshot explains which command creates one', () => {
 });
 
 test('parseArgs rejects unknown flags and resolves --out', () => {
-  assert.deepEqual(aa.parseArgs(['--pro', '--dry-run']), { pro: true, dryRun: true, out: null, help: false });
+  assert.deepEqual(aa.parseArgs(['--dry-run']), { dryRun: true, out: null, help: false });
   assert.equal(aa.parseArgs(['--out', 'tmp/x.json']).out, path.resolve('tmp/x.json'));
   assert.throws(() => aa.parseArgs(['--out']), /--out needs a path/);
   assert.throws(() => aa.parseArgs(['--nope']), /unknown argument/);

@@ -3,9 +3,9 @@
 /**
  * Artificial Analysis → benchmark registry proposals.
  *
- * Reads a recorded snapshot (`data/aa-snapshot-pro.json` when present, else
- * `data/aa-snapshot.json`) and proposes `data/benchmark-inputs.json` rows for
- * the models the dispatcher can run but cannot score yet.
+ * Reads a recorded snapshot (`data/aa-snapshot.json`) and proposes
+ * `data/benchmark-inputs.json` rows for the models the dispatcher can run but
+ * cannot score yet.
  *
  * Field mapping is not invented here. Two existing artifacts define it:
  *
@@ -17,11 +17,13 @@
  * already USD per 1M tokens; `cost_per_task.total_cost` is per task and
  * `total_cost` is the whole evaluation, so neither is a price column).
  *
- * Pro responses also carry per-benchmark evaluations, but the importer does not
- * export them and neither the AA key names nor their scale are verified against
- * the registry columns. They are therefore refused by default and only proposed
- * with `--include-benchmarks`, which prints an UNVERIFIED-mapping warning per
- * field. Nothing here is importer parity except the eight AA_fetch fields.
+ * Nothing here is importer parity except the eight AA_fetch fields. The six
+ * per-benchmark columns (terminalBench, sciCode, aaLcr, hle, gpqa, critPt) are
+ * deliberately not proposed: the Free body carries no per-benchmark evaluations
+ * (0 of 726 models on 2026-11-08), the Pro endpoint that adds them needs a key
+ * this project does not have, and the importer exports no such column, so
+ * neither the AA keys nor their scale could be verified. Those columns come
+ * from the AA website or manual research (docs/benchmark-backlog.md).
  *
  * Fields that docs/benchmark-backlog.md marks unsafe are never filled: a value
  * on the wrong scale or vintage silently corrupts the min–max normalization for
@@ -38,7 +40,6 @@
  *   npm run aa-propose -- --models grok-4-6
  *   npm run aa-propose -- --json
  *   npm run aa-propose -- --write --confirm-match grok-4-6
- *   npm run aa-propose -- --include-benchmarks
  *
  * `--prices` is a second, read-only by default mode: it compares the blended
  * $/MTok of every registry row that has an exact AA identity with the same
@@ -57,7 +58,7 @@ const { homeConfigPath, homeDataPath, loadRoiConfig } = require('../../lib/home.
 const { modelKey } = require('../../lib/model-key.js');
 const { aaPrices, blendMtok } = require('../../lib/aa-pricing.js');
 const { weightedPresent } = require('../score.js');
-const { freeSnapshotPath, proSnapshotPath, readSnapshot } = require('./aa.js');
+const { freeSnapshotPath, readSnapshot } = require('./aa.js');
 
 const defaultRegistryPath = () => homeDataPath('benchmark-inputs.json');
 const defaultRunnablesPath = () => homeConfigPath('runnables.json');
@@ -82,8 +83,7 @@ const REGISTRY_FIELDS = [
 ];
 
 const ABSENT = 'AA returned no value for this model';
-const FREE_TIER = 'Free snapshot has no per-benchmark evaluations; run npm run aa-sync -- --pro';
-const BENCHMARK_UNVERIFIED = 'not in importer; AA key/scale unverified';
+const BENCHMARKS_UNSOURCED = 'AA publishes no per-benchmark evaluations; these columns need the AA website or manual research (docs/benchmark-backlog.md)';
 
 /**
  * Provider families: the canonical registry prefix plus every spelling AA, the
@@ -130,19 +130,10 @@ const AA_FIELDS = [
 ];
 
 /**
- * Pro-only per-benchmark evaluations feeding the four scoring partitions.
- * NOT importer parity: the importer exports no such column, so both the AA key
- * and the scale are unverified against the registry. Gated behind
- * `--include-benchmarks`. AA stores fractions; the registry stores percentages.
+ * Registry columns AA cannot source. Listed so the report says why they stay
+ * empty instead of leaving the reader to guess.
  */
-const AA_BENCHMARKS = [
-  { field: 'terminalBench', key: 'terminalbench_v2_1' },
-  { field: 'sciCode', key: 'scicode' },
-  { field: 'aaLcr', key: 'aa_lcr' },
-  { field: 'hle', key: 'hle' },
-  { field: 'gpqa', key: 'gpqa_diamond' },
-  { field: 'critPt', key: 'critpt' },
-];
+const UNSOURCED = ['terminalBench', 'sciCode', 'aaLcr', 'hle', 'gpqa', 'critPt'];
 
 /**
  * Never filled, with the reason from docs/benchmark-backlog.md. `key` names the
@@ -231,6 +222,16 @@ function newRowNameFor(aa) {
   return `${prefix}/${slug}`;
 }
 
+/**
+ * AA publishes one row per model *variant*: "Claude Sonnet 4.6 (Non-reasoning,
+ * High)", "GPT-5.6 Terra (Max)". The registry column is model-level, so a
+ * variant qualifier is worth saying out loud when its index is proposed.
+ */
+function variantOf(name) {
+  const match = /\(([^()]+)\)\s*$/.exec(typeof name === 'string' ? name.trim() : '');
+  return match ? match[1].trim() : null;
+}
+
 /** A partition counts as filled when score.js's own weightedPresent sees input. */
 function partitionState(row, partitionMap) {
   const missing = [];
@@ -296,8 +297,7 @@ function matchAaRow(models, target, existing) {
 }
 
 /** Build one proposal: fills, refusals, identity verdict and the resulting row. */
-function proposeOne({ target, snapshot, partitionMap, includeBenchmarks = false }) {
-  const tier = snapshot.source?.tier ?? null;
+function proposeOne({ target, snapshot, partitionMap }) {
   const existing = target.row || null;
   const proposed = {};
   for (const field of REGISTRY_FIELDS) proposed[field] = existing ? (existing[field] ?? null) : null;
@@ -306,7 +306,6 @@ function proposeOne({ target, snapshot, partitionMap, includeBenchmarks = false 
   const kept = [];
   const nulled = [];
   const absent = [];
-  const unverified = [];
 
   const consider = (field, value, from) => {
     if (value == null) {
@@ -341,26 +340,9 @@ function proposeOne({ target, snapshot, partitionMap, includeBenchmarks = false 
   if (aa && !rejected) {
     for (const entry of AA_FIELDS) consider(entry.field, entry.read(aa), entry.column);
 
-    // Not importer parity: refused unless explicitly requested.
-    for (const entry of AA_BENCHMARKS) {
-      const value = percent(aa.evaluations?.[entry.key]);
-      if (isPresent(proposed[entry.field])) {
-        kept.push({ field: entry.field, registryValue: proposed[entry.field], aaValue: value, reason: BENCHMARK_UNVERIFIED });
-        continue;
-      }
-      if (!includeBenchmarks) {
-        // A number AA actually has is refused on purpose; a missing one is just
-        // missing, and on a Free body the tier is the reason.
-        if (value == null) absent.push({ field: entry.field, reason: tier === 'free' ? FREE_TIER : ABSENT });
-        else nulled.push({ field: entry.field, aaValue: value, reason: BENCHMARK_UNVERIFIED });
-        continue;
-      }
-      if (value == null) {
-        absent.push({ field: entry.field, reason: tier === 'free' ? FREE_TIER : ABSENT });
-        continue;
-      }
-      unverified.push({ field: entry.field, key: entry.key, reason: BENCHMARK_UNVERIFIED });
-      consider(entry.field, value, `evaluations.${entry.key} (x100)`);
+    // Reported once, not per field: AA cannot source these at all.
+    for (const field of UNSOURCED) {
+      if (!isPresent(proposed[field])) absent.push({ field, reason: BENCHMARKS_UNSOURCED });
     }
 
     for (const entry of UNSAFE) {
@@ -392,7 +374,6 @@ function proposeOne({ target, snapshot, partitionMap, includeBenchmarks = false 
     canCreate: rowNameSource === 'aa',
     modelKey: target.modelKey,
     indexVersion: snapshot.intelligenceIndexVersion ?? null,
-    tier,
     runnable: target.runnable ? target.runnable.id : null,
     runnableModelKey: target.runnable ? (target.runnable.modelKey ?? null) : null,
     existingRow: Boolean(existing),
@@ -401,6 +382,7 @@ function proposeOne({ target, snapshot, partitionMap, includeBenchmarks = false 
       slug: aa.slug ?? null,
       name: aa.name ?? null,
       creator: aa.model_creator?.name ?? null,
+      variant: variantOf(aa.name),
       exact: matched.exact,
       via: matched.via,
     } : null,
@@ -410,7 +392,6 @@ function proposeOne({ target, snapshot, partitionMap, includeBenchmarks = false 
     kept,
     nulled,
     absent,
-    unverified,
     proposed,
     completeBefore: before.complete,
     completeAfter: after.complete,
@@ -473,26 +454,28 @@ function applyProposals(registry, proposals, { confirmMatch = [] } = {}) {
   const models = registry.models.map(row => ({ ...row }));
   const changes = [];
   for (const proposal of proposals) {
+    // `key` is the target model key, i.e. exactly what --confirm-match takes.
+    const change = (action, fields = []) => ({ model: proposal.model, key: proposal.modelKey, action, fields });
     if (proposal.rejected) {
-      changes.push({ model: proposal.model, action: 'rejected', fields: [] });
+      changes.push(change('rejected'));
       continue;
     }
     if (!proposal.match) {
-      changes.push({ model: proposal.model, action: 'skipped', fields: [] });
+      changes.push(change('skipped'));
       continue;
     }
     if (!proposal.match.exact && !confirmed.has(proposal.modelKey)) {
-      changes.push({ model: proposal.model, action: 'unconfirmed', fields: [] });
+      changes.push(change('unconfirmed'));
       continue;
     }
     let row = models.find(m => m.model === proposal.model) || null;
     if (!row && !proposal.canCreate) {
-      changes.push({ model: proposal.model, action: 'unnamed', fields: [] });
+      changes.push(change('unnamed'));
       continue;
     }
     // A model AA knows nothing about must not become an all-null registry row.
     if (!row && !proposal.fills.length) {
-      changes.push({ model: proposal.model, action: 'skipped', fields: [] });
+      changes.push(change('skipped'));
       continue;
     }
     const created = !row;
@@ -508,7 +491,7 @@ function applyProposals(registry, proposals, { confirmMatch = [] } = {}) {
       row[fill.field] = fill.value;
       applied.push(fill.field);
     }
-    changes.push({ model: proposal.model, action: created ? 'created' : 'updated', fields: applied });
+    changes.push(change(created ? 'created' : 'updated', applied));
   }
   return { models, changes };
 }
@@ -552,9 +535,9 @@ function renderProposal(p) {
   if (p.fills.length) lines.push(`  fill:   ${p.fills.map(f => `${f.field}=${JSON.stringify(f.value)}`).join('  ')}`);
   if (p.fills.some(f => f.field === 'intRef')) {
     lines.push(`  note:   intRef is Intelligence Index v${p.indexVersion ?? 'unknown'}; the registry has no version column, so existing INT values may come from another index version`);
-  }
-  for (const u of p.unverified) {
-    lines.push(`  UNVERIFIED mapping: ${u.field} ← evaluations.${u.key} (x100) — ${u.reason}`);
+    if (p.match?.variant) {
+      lines.push(`  note:   the AA row is the "${p.match.variant}" variant, so intRef is that variant's index, not necessarily the model-level value`);
+    }
   }
   if (p.kept.length) {
     lines.push(`  keep:   ${p.kept.map(f => `${f.field}=${JSON.stringify(f.registryValue)} (AA ${JSON.stringify(f.aaValue)})`).join('  ')}`);
@@ -763,7 +746,7 @@ function formatRatio(value) {
 function renderPriceDrift(report) {
   const { snapshot, costBlend, driftK, rows, notComparable, unmatched } = report;
   const lines = [];
-  lines.push(`snapshot: ${snapshot.path} (tier ${snapshot.tier ?? 'unknown'}, ${snapshot.modelCount ?? 0} models, generated ${snapshot.generatedAt ?? 'unknown'})`);
+  lines.push(`snapshot: ${snapshot.path} (${snapshot.modelCount ?? 0} models, generated ${snapshot.generatedAt ?? 'unknown'})`);
   lines.push(`cost blend: cache ${costBlend.cache}, input ${costBlend.input}, output ${costBlend.output}; drift band [${formatRatio(1 / driftK)}, ${formatRatio(driftK)}] of registry/AA`);
   const inScope = rows.length + notComparable.length;
   lines.push(`exact AA identity: ${inScope} of ${inScope + unmatched.length} registry rows, ${rows.length} comparable, ${notComparable.length} not comparable`);
@@ -949,7 +932,6 @@ function runPrices({
   const report = {
     snapshot: {
       path: snapshotFile,
-      tier: snapshot.source?.tier ?? null,
       generatedAt: snapshot.generatedAt ?? null,
       intelligenceIndexVersion: snapshot.intelligenceIndexVersion ?? null,
       modelCount: snapshot.modelCount ?? (snapshot.models || []).length,
@@ -983,14 +965,13 @@ function parseModelList(value, flag) {
 }
 
 function parseArgs(argv) {
-  const opts = { models: null, json: false, write: false, includeBenchmarks: false, confirmMatch: [], snapshot: null, help: false, prices: false, driftK: DRIFT_K, confirmPrice: [] };
+  const opts = { models: null, json: false, write: false, confirmMatch: [], snapshot: null, help: false, prices: false, driftK: DRIFT_K, confirmPrice: [] };
   const explicit = new Set();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--json') opts.json = true;
     else if (arg === '--write') opts.write = true;
     else if (arg === '--prices') opts.prices = true;
-    else if (arg === '--include-benchmarks') opts.includeBenchmarks = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg === '--models') {
       const value = argv[++i];
@@ -1019,7 +1000,6 @@ function parseArgs(argv) {
 
   if (opts.prices) {
     if (opts.models) throw new Error('--models is not supported with --prices: the report covers every registry row with an exact AA identity');
-    if (opts.includeBenchmarks) throw new Error('--include-benchmarks is not supported with --prices');
     if (opts.confirmMatch.length) throw new Error('--confirm-match is not supported with --prices: only an exact AA identity is compared');
     if (opts.write && !opts.confirmPrice.length) throw new Error('--write in --prices mode needs --confirm-price k1,k2: there is no bulk overwrite');
   } else {
@@ -1030,8 +1010,7 @@ function parseArgs(argv) {
 }
 
 const USAGE = `Usage: npm run aa-propose -- [--models k1,k2] [--json] [--write]
-                            [--include-benchmarks] [--confirm-match k1,k2]
-                            [--snapshot PATH]
+                            [--confirm-match k1,k2] [--snapshot PATH]
        npm run aa-propose -- --prices [--drift-k K] [--json]
                             [--write --confirm-price k1,k2] [--snapshot PATH]
 
@@ -1039,13 +1018,12 @@ const USAGE = `Usage: npm run aa-propose -- [--models k1,k2] [--json] [--write]
   --json               print the proposals as JSON
   --write              apply null-fills/new rows to data/benchmark-inputs.json,
                        then run: npm run pipeline && npm run verify
-  --include-benchmarks propose the Pro per-benchmark evaluations too. NOT
-                       importer parity: AA key names and scale are unverified,
-                       so every such field is printed as UNVERIFIED
   --confirm-match K1,K2  allow --write for models whose AA match only folds
                        (preview/thinking/date suffixes, display-name fallback)
-  --snapshot PATH      snapshot to read (default: the Pro snapshot if present,
-                       else the Free one)
+  --snapshot PATH      snapshot to read (default ${freeSnapshotPath()})
+
+Proposes only what the Free catalog carries: aaSlug, the three indices, prices
+and speed. The six per-benchmark columns need the AA website or manual research.
 
 Price drift (--prices), a report that never changes the exit code:
 
@@ -1060,12 +1038,8 @@ Price drift (--prices), a report that never changes the exit code:
 
 Never edits config/runnables.json; it prints the modelKey updates to make.`;
 
-/** The Pro snapshot wins when both exist: it is a superset of the Free body. */
-function resolveSnapshotPath(explicit, paths = {}) {
-  if (explicit) return explicit;
-  const pro = paths.pro ?? proSnapshotPath();
-  const free = paths.free ?? freeSnapshotPath();
-  return fs.existsSync(pro) ? pro : free;
+function resolveSnapshotPath(explicit) {
+  return explicit || freeSnapshotPath();
 }
 
 /**
@@ -1076,7 +1050,6 @@ function runPropose({
   models = null,
   json = false,
   write = false,
-  includeBenchmarks = false,
   confirmMatch = [],
   snapshotPath = null,
   registryPath = defaultRegistryPath(),
@@ -1090,12 +1063,11 @@ function runPropose({
   // With --models the runnables file is only needed to resolve a runnable id.
   const runnables = models ? (tryReadJson(runnablesPath) || { runnables: [] }) : readJson(runnablesPath);
   const partitionMap = readConfig(configPath).partitionMap;
-  const tier = snapshot.source?.tier ?? null;
 
   const targets = models
     ? explicitTargets(models, { runnables, registry })
     : defaultTargets({ runnables, registry, partitionMap });
-  const proposals = targets.map(target => proposeOne({ target, snapshot, partitionMap, includeBenchmarks }));
+  const proposals = targets.map(target => proposeOne({ target, snapshot, partitionMap }));
 
   let written = null;
   if (write) {
@@ -1115,22 +1087,18 @@ function runPropose({
     log(JSON.stringify({
       snapshot: {
         path: snapshotFile,
-        tier,
         generatedAt: snapshot.generatedAt ?? null,
         intelligenceIndexVersion: snapshot.intelligenceIndexVersion ?? null,
         modelCount: snapshot.modelCount ?? snapshot.models.length,
       },
-      includeBenchmarks,
       proposals,
       written,
       runnableUpdates: updates,
     }, null, 2));
-    return { proposals, written, updates, snapshot: snapshotFile, tier };
+    return { proposals, written, updates, snapshot: snapshotFile };
   }
 
-  log(`snapshot: ${snapshotFile} (tier ${tier ?? 'unknown'}, ${snapshot.modelCount ?? snapshot.models.length} models, Intelligence Index v${snapshot.intelligenceIndexVersion ?? 'unknown'}, generated ${snapshot.generatedAt ?? 'unknown'})`);
-  if (tier === 'free') log('tier free: per-benchmark evaluations are unavailable — run npm run aa-sync -- --pro for a Pro snapshot');
-  if (!includeBenchmarks) log(`benchmark fields are not proposed by default (${BENCHMARK_UNVERIFIED}); pass --include-benchmarks to see them`);
+  log(`snapshot: ${snapshotFile} (${snapshot.modelCount ?? snapshot.models.length} models, Intelligence Index v${snapshot.intelligenceIndexVersion ?? 'unknown'}, generated ${snapshot.generatedAt ?? 'unknown'})`);
   log(`Targets: ${proposals.length}`);
   log('');
   for (const proposal of proposals) {
@@ -1145,7 +1113,7 @@ function runPropose({
     }
     for (const change of written.changed) log(`registry ${change.action}: ${change.model} (${change.fields.join(', ')})`);
     for (const change of written.blocked.filter(c => c.action === 'unconfirmed')) {
-      log(`registry skipped: ${change.model} — folded AA match, pass --confirm-match ${modelKey(change.model)} to write it`);
+      log(`registry skipped: ${change.model} — folded AA match, pass --confirm-match ${change.key} to write it`);
     }
     if (written.changed.length) log('next: npm run pipeline && npm run verify');
     log('');
@@ -1157,7 +1125,7 @@ function runPropose({
   }
   const scorable = proposals.filter(p => p.completeAfter).length;
   log(`${scorable} of ${proposals.length} proposal(s) would make the model scoreable.`);
-  return { proposals, written, updates, snapshot: snapshotFile, tier };
+  return { proposals, written, updates, snapshot: snapshotFile };
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -1195,12 +1163,12 @@ module.exports = {
   REGISTRY_FIELDS,
   PROVIDERS,
   AA_FIELDS,
-  AA_BENCHMARKS,
+  UNSOURCED,
   UNSAFE,
-  BENCHMARK_UNVERIFIED,
-  FREE_TIER,
+  BENCHMARKS_UNSOURCED,
   familyOf,
   providerOfModel,
+  variantOf,
   slugify,
   newRowNameFor,
   partitionState,

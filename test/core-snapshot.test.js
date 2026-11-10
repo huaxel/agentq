@@ -332,19 +332,19 @@ const AA_RUNNABLES = {
   ],
 };
 
-function aaFixtureRoot({ snapshot = AA_SNAPSHOT, proSnapshot = null, registry = null } = {}) {
+function aaFixtureRoot({ snapshot = AA_SNAPSHOT, registry = null } = {}) {
   const root = fixtureRoot({ roi: AA_ROI, quota: QUOTA, runnables: AA_RUNNABLES });
   if (snapshot !== null) fs.writeFileSync(path.join(root, 'data', 'aa-snapshot.json'), JSON.stringify(snapshot));
-  if (proSnapshot !== null) fs.writeFileSync(path.join(root, 'data', 'aa-snapshot-pro.json'), JSON.stringify(proSnapshot));
   if (registry !== null) fs.writeFileSync(path.join(root, 'data', 'benchmark-inputs.json'), JSON.stringify(registry));
   return root;
 }
 
-test('the AA snapshot path prefers the Pro tier and honours the env override', () => {
+test('the AA snapshot path is the Free catalog and honours the env override', () => {
   const root = aaFixtureRoot();
   assert.equal(defaultAaSnapshotPath(root), path.join(root, 'data', 'aa-snapshot.json'));
+  // A leftover Pro body from an older aa-sync is ignored.
   fs.writeFileSync(path.join(root, 'data', 'aa-snapshot-pro.json'), JSON.stringify(AA_SNAPSHOT));
-  assert.equal(defaultAaSnapshotPath(root), path.join(root, 'data', 'aa-snapshot-pro.json'));
+  assert.equal(defaultAaSnapshotPath(root), path.join(root, 'data', 'aa-snapshot.json'));
 
   withEnv({ AGENTQ_AA_SNAPSHOT: '/env/aa.json' }, () => {
     assert.equal(resolvePaths({ home: root }).aaSnapshotPath, '/env/aa.json');

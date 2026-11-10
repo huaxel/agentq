@@ -9,7 +9,7 @@
  * (`gscripts/model-catalogs.gs`, fetchArtificialAnalysisData). This file
  * reproduces its request shape and validation exactly:
  *
- *   - Free endpoint by default (`/api/v2/language/models/free`), Pro is opt-in
+ *   - the Free endpoint (`/api/v2/language/models/free`)
  *   - `x-api-key` header, never logged
  *   - pagination validated per page (page number, total_pages, has_more)
  *   - Intelligence Index version must be stable across the whole crawl
@@ -17,11 +17,12 @@
  *   - response size cap, idle timeout and a total per-request deadline
  *   - duplicate or missing model ids abort the crawl
  *
- * Each tier writes its own snapshot, because a Free body and a Pro body answer
- * different questions and must never be confused for one another:
- *
- *   free -> data/aa-snapshot.json        (headline indices, prices, performance)
- *   pro  -> data/aa-snapshot-pro.json    (adds per-benchmark evaluations)
+ * The Free body carries the headline indices, prices and performance, and no
+ * per-benchmark evaluations at all (0 of 726 models on 2026-11-08). The Pro
+ * endpoint that adds them needs a Pro+ key this project does not have, so it is
+ * not implemented: a flag that only ever returns 403 is a trap, not a feature.
+ * The six benchmark columns in the registry come from the AA website or manual
+ * research instead (see docs/benchmark-backlog.md).
  *
  * The raw model records are kept verbatim: the field mapping lives in
  * `aa-propose.js`, and a lossy snapshot would make that mapping unauditable.
@@ -33,8 +34,7 @@
  * error and no network call at all.
  *
  * Usage:
- *   npm run aa-sync                # Free endpoint -> data/aa-snapshot.json
- *   npm run aa-sync -- --pro       # Pro endpoint  -> data/aa-snapshot-pro.json
+ *   npm run aa-sync                # fetch + validate -> data/aa-snapshot.json
  *   npm run aa-sync -- --dry-run   # fetch + validate, write nothing
  */
 const fs = require('node:fs');
@@ -46,13 +46,10 @@ const { homeDataPath } = require('../../lib/home.js');
 
 /** Snapshots are personal data: they live in AGENTQ_HOME, never the checkout. */
 const freeSnapshotPath = () => homeDataPath('aa-snapshot.json');
-const proSnapshotPath = () => homeDataPath('aa-snapshot-pro.json');
 const RELATIVE_FREE = 'data/aa-snapshot.json';
-const RELATIVE_PRO = 'data/aa-snapshot-pro.json';
 
 /** Supported V2 language catalog (see gscripts/README.md). */
 const ENDPOINT = 'https://artificialanalysis.ai/api/v2/language/models';
-const ACCESS_LEVELS = ['free', 'pro'];
 
 const MAX_PAGES = 100;
 const MAX_ATTEMPTS = 3;
@@ -66,34 +63,20 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN']);
 const STATUS_HINT = {
   401: 'check the API key',
-  403: 'check API access (Pro endpoints need a Pro+ key)',
+  403: 'check that the key is valid for this endpoint',
   410: 'endpoint retired; update to a supported V2 endpoint',
   429: 'rate limited; retry later',
 };
 
 const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-/** URL for one page. Free is the default; Pro is explicit opt-in. */
-function pageUrl(page, access = 'free') {
-  if (!ACCESS_LEVELS.includes(access)) {
-    throw new Error(`access must be one of ${ACCESS_LEVELS.join(', ')}`);
-  }
-  const base = access === 'free' ? `${ENDPOINT}/free` : ENDPOINT;
-  return `${base}?page=${page}`;
-}
-
-/** Snapshot path for a tier: the two bodies are never interchangeable. */
-function defaultOut(access = 'free') {
-  if (!ACCESS_LEVELS.includes(access)) {
-    throw new Error(`access must be one of ${ACCESS_LEVELS.join(', ')}`);
-  }
-  return access === 'pro' ? proSnapshotPath() : freeSnapshotPath();
+/** URL for one page of the Free catalog. */
+function pageUrl(page) {
+  return `${ENDPOINT}/free?page=${page}`;
 }
 
 function relativeOut(file) {
-  if (file === freeSnapshotPath()) return RELATIVE_FREE;
-  if (file === proSnapshotPath()) return RELATIVE_PRO;
-  return file;
+  return file === freeSnapshotPath() ? RELATIVE_FREE : file;
 }
 
 /** Case-insensitive header lookup (node lowercases, injected clients may not). */
@@ -211,13 +194,12 @@ function defaultHttp(url, headers, options = {}) {
  */
 async function fetchPage({
   page,
-  access,
   apiKey,
   http = defaultHttp,
   sleep = defaultSleep,
   nowMs = Date.now,
 }) {
-  const url = pageUrl(page, access);
+  const url = pageUrl(page);
   let lastStatus = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let res;
@@ -255,7 +237,6 @@ async function fetchPage({
  * Index version, stable page count, no duplicate ids, no empty middle page).
  */
 async function collectAll({
-  access = 'free',
   apiKey,
   http = defaultHttp,
   sleep = defaultSleep,
@@ -270,7 +251,7 @@ async function collectAll({
   let pageCount = 0;
 
   for (let page = 1; page <= MAX_PAGES; page++) {
-    const payload = await fetchPage({ page, access, apiKey, http, sleep, nowMs });
+    const payload = await fetchPage({ page, apiKey, http, sleep, nowMs });
     const pagination = payload.pagination;
     pageCount = page;
 
@@ -309,8 +290,7 @@ async function collectAll({
     throw new Error('Artificial Analysis returned no models; existing snapshot unchanged');
   }
   return {
-    access,
-    endpoint: pageUrl(1, access).replace('?page=1', ''),
+    endpoint: pageUrl(1).replace('?page=1', ''),
     intelligenceIndexVersion,
     totalPages,
     pageCount,
@@ -318,12 +298,12 @@ async function collectAll({
   };
 }
 
-/** Snapshot document written to data/aa-snapshot[-pro].json. */
+/** Snapshot document written to data/aa-snapshot.json. */
 function buildSnapshot(result, { now = new Date() } = {}) {
   return {
     schemaVersion: 1,
     generatedAt: now.toISOString(),
-    source: { endpoint: result.endpoint, tier: result.access },
+    source: { endpoint: result.endpoint },
     intelligenceIndexVersion: result.intelligenceIndexVersion,
     pageCount: result.pageCount,
     modelCount: result.models.length,
@@ -367,6 +347,11 @@ function readApiKey({
   }
   if (linkStat.isSymbolicLink()) {
     throw new Error(`${file} is a symlink; refusing to read the key through it`);
+  }
+  // Checked before opening: opening a FIFO read-only blocks until a writer
+  // appears, so a non-regular key path could hang the sync forever.
+  if (!linkStat.isFile()) {
+    throw new Error(`${file} is not a regular file`);
   }
 
   const noFollow = fsImpl.constants && fsImpl.constants.O_NOFOLLOW ? fsImpl.constants.O_NOFOLLOW : 0;
@@ -428,7 +413,6 @@ function readSnapshot(file) {
 
 /** Key resolution + crawl + write, in that order (no key means no network). */
 async function runSync({
-  access = 'free',
   env = process.env,
   home = os.homedir(),
   http = defaultHttp,
@@ -439,19 +423,18 @@ async function runSync({
   now = new Date(),
 } = {}) {
   const { key } = readApiKey({ env, home });
-  const result = await collectAll({ access, apiKey: key, http, sleep, nowMs });
+  const result = await collectAll({ apiKey: key, http, sleep, nowMs });
   const snapshot = buildSnapshot(result, { now });
-  const target = out || defaultOut(access);
+  const target = out || freeSnapshotPath();
   if (!dryRun) writeSnapshot(target, snapshot);
   return snapshot;
 }
 
 function parseArgs(argv) {
-  const opts = { pro: false, dryRun: false, out: null, help: false };
+  const opts = { dryRun: false, out: null, help: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--pro') opts.pro = true;
-    else if (arg === '--dry-run') opts.dryRun = true;
+    if (arg === '--dry-run') opts.dryRun = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg === '--out') {
       const value = argv[++i];
@@ -462,12 +445,10 @@ function parseArgs(argv) {
   return opts;
 }
 
-const USAGE = `Usage: npm run aa-sync -- [--pro] [--dry-run] [--out PATH]
+const USAGE = `Usage: npm run aa-sync -- [--dry-run] [--out PATH]
 
-  --pro       query the Pro endpoint (adds per-benchmark evaluations) and write
-              ${RELATIVE_PRO}
   --dry-run   fetch and validate, print a summary, write nothing
-  --out PATH  snapshot path (default ${RELATIVE_FREE}, or the Pro path with --pro)
+  --out PATH  snapshot path (default ${RELATIVE_FREE})
 
 Key: AA_API_KEY, or \${XDG_CONFIG_HOME:-~/.config}/agentq/aa-api-key (mode 0600).`;
 
@@ -477,10 +458,9 @@ async function main(argv = process.argv.slice(2)) {
     console.log(USAGE);
     return 0;
   }
-  const access = opts.pro ? 'pro' : 'free';
-  const target = opts.out || defaultOut(access);
-  const snapshot = await runSync({ access, out: target, dryRun: opts.dryRun });
-  const summary = `${snapshot.modelCount} models, Intelligence Index v${snapshot.intelligenceIndexVersion}, tier ${snapshot.source.tier}, ${snapshot.pageCount} page(s)`;
+  const target = opts.out || freeSnapshotPath();
+  const snapshot = await runSync({ out: target, dryRun: opts.dryRun });
+  const summary = `${snapshot.modelCount} models, Intelligence Index v${snapshot.intelligenceIndexVersion}, ${snapshot.pageCount} page(s)`;
   if (opts.dryRun) {
     console.log(`dry run: ${summary} (nothing written)`);
   } else {
@@ -510,9 +490,7 @@ module.exports = {
   PAGE_DELAY_MS,
   RETRYABLE_CODES,
   freeSnapshotPath,
-  proSnapshotPath,
   pageUrl,
-  defaultOut,
   relativeOut,
   headerOf,
   retryDelayMs,

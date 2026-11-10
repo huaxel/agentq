@@ -237,8 +237,7 @@ model with remaining quota can rank above the same model on a metered path.
 | `$AGENTQ_HOME/data/ccagg-by-model-path.csv` | model/path aggregate | no |
 | `$AGENTQ_HOME/data/ccagg-daily.csv` | dated usage | no |
 | `$AGENTQ_HOME/data/snapshots/<date>.json` | local trend history | no |
-| `$AGENTQ_HOME/data/aa-snapshot.json` | optional local Artificial Analysis catalog (Free tier) | no |
-| `$AGENTQ_HOME/data/aa-snapshot-pro.json` | optional local Artificial Analysis catalog (Pro tier) | no |
+| `$AGENTQ_HOME/data/aa-snapshot.json` | optional local Artificial Analysis catalog | no |
 | `$AGENTQ_HOME/data/usage-imports/<host>.json` | private cross-machine source bundle | no |
 
 Run the stages independently when debugging:
@@ -294,8 +293,7 @@ Registry rows can be filled from a recorded Artificial Analysis catalog instead
 of the spreadsheet bridge:
 
 ```bash
-npm run aa-sync                 # Free endpoint -> $AGENTQ_HOME/data/aa-snapshot.json
-npm run aa-sync -- --pro        # Pro endpoint  -> $AGENTQ_HOME/data/aa-snapshot-pro.json
+npm run aa-sync                 # fetch + validate -> $AGENTQ_HOME/data/aa-snapshot.json
 npm run aa-propose              # proposals for runnables that cannot score yet
 npm run aa-propose -- --models grok-4-6 --json
 npm run aa-propose -- --write   # fill nulls / add rows, then:
@@ -303,37 +301,54 @@ npm run pipeline && npm run verify
 npm run aa-propose -- --prices  # registry price drift against AA (report only)
 ```
 
-Each tier writes its own snapshot, because the two bodies answer different
-questions and must never be confused: the Free body carries the headline
-indices, prices and median performance, the Pro body adds per-benchmark
-evaluations. `aa-propose` reads the Pro snapshot when it exists and the Free one
-otherwise, and says which tier it used and which fields are missing because of
-that tier.
-
 The key comes from `AA_API_KEY`, otherwise
 `${XDG_CONFIG_HOME:-~/.config}/agentq/aa-api-key`. The key file must be a
 regular file owned by the current uid with mode exactly 0600; it is opened with
-`O_NOFOLLOW` and read through the descriptor, so a symlink, a swapped path or a
-group-readable file is refused instead of used. The collector never logs the
-key, and without one it fails before any request.
+`O_NOFOLLOW` and read through the descriptor, so a symlink, a FIFO, a swapped
+path or a group-readable file is refused instead of used. The collector never
+logs the key, and without one it fails before any request.
 
-#### What is importer parity, and what is not
+#### What AA can and cannot source
 
 `aa-propose` reproduces exactly the mapping the sheet importer
 (`gscripts/model-catalogs.gs`, the `AA_fetch` columns) and the xlsx exporter
 already perform: `aaSlug`, `intRef`, `aaCoding`, `aaAgentic`, `cachePrice`,
-`inputPrice`, `outputPrice`, `speed`. That is the whole parity set.
+`inputPrice`, `outputPrice`, `speed`. That is the whole set, and it is the whole
+of what the Free catalog carries.
 
-The Pro per-benchmark evaluations (`terminalBench`, `sciCode`, `aaLcr`, `hle`,
-`gpqa`, `critPt`) are **not** importer parity: the importer exports no such
-column, so neither the AA field names nor their scale are verified against the
-registry. They are refused by default and only proposed with
-`--include-benchmarks`, which prints an `UNVERIFIED mapping` warning per field.
-Treat those values as a research aid to check by hand, not as imported data.
+The six per-benchmark columns (`terminalBench`, `sciCode`, `aaLcr`, `hle`,
+`gpqa`, `critPt`) are **not** proposed. The Free body has no per-benchmark
+evaluations at all (0 of 726 models on 2026-11-08), the Pro endpoint that adds
+them needs a Pro+ key this project does not have, and the importer exports no
+such column, so neither the AA keys nor their scale could be verified. Those
+columns come from the AA website or manual research, as recorded in
+[benchmark-backlog.md](benchmark-backlog.md). The report lists them once as
+unsourced rather than pretending they are missing per model.
 
-Fields that [benchmark-backlog.md](benchmark-backlog.md) marks unsafe (`gdpval`,
-`tau3Banking`, `apexAgents`) plus the ambiguous `aaOmni` column are never
-filled, whatever the flags say.
+Fields that the backlog marks unsafe (`gdpval`, `tau3Banking`, `apexAgents`)
+plus the ambiguous `aaOmni` column are never filled, whatever AA sends.
+
+#### What a fresh snapshot does and does not reproduce
+
+The mapping above is what the importer does, but a current AA body does not
+reproduce the values already in the registry. Measured on the 2026-11-08 Free
+snapshot against `data/benchmark-inputs.json`, comparing every row that has both
+values:
+
+| field | compared | agree | note |
+| --- | --- | --- | --- |
+| `inputPrice` / `outputPrice` | 44 | 61% / 57% | some rows differ 4x (`gpt-oss-120b` 0.04 vs 0.15): the registry holds a host's price, AA lists list price |
+| `cachePrice` | 37 | 78% | |
+| `speed` | 31 | 6% | live measurement; a different run gives a different number |
+| `intRef` | 4 | 0% | AA publishes one row per variant (`(Non-reasoning, High)`, `(Max)`), the registry column is model-level, and the differences run in both directions (54.7 vs 18.9, 9 vs 23.1), so this is not an index-version rescale |
+
+So a fill is a fresh AA value, not a reproduction of the sheet, and a column can
+end up holding both granularities. That is why an existing registry value always
+wins, and why `intRef` carries a note when the matched AA row is a variant.
+
+The consequence for scoring: no snapshot can make a model scoreable on its own.
+Three of the four partitions need the benchmark columns AA cannot source, and
+the agents partition has no safe AA source at all.
 
 #### Identity and writing
 
@@ -345,19 +360,19 @@ Matching is strict, because a wrong model is worse than no proposal:
   parenthetical qualifier, or a display-name fallback) is reported as
   `FOLDED MATCH` and is **not** written unless `--confirm-match <modelKey>`
   names it;
-- a tie, or a `model_creator` that disagrees with the model's provider, is a
-  rejection with a reason, never a guess.
+- a tie, or a `model_creator` that disagrees with the registry row's
+  `creator/model` name, is a rejection with a reason, never a guess. A runnable
+  id's prefix is the hosting subscription (`mistral/` serves DeepSeek's model),
+  so it is never used for that check.
 
 `--write` fills null fields only: an existing value always wins. A new row is
 named `<creator>/<AA slug>` from the AA record, never after a runnable id, and
 is skipped when the AA row has no creator or slug. `config/runnables.json` is
-never edited — the `modelKey` updates to make are printed instead, including for
+never edited: the `modelKey` updates to make are printed instead, including for
 models whose row needed no new values.
 
-A Free snapshot cannot complete a model by itself: the four scoring partitions
-need the Pro per-benchmark evaluations, and the agents partition has no safe AA
-source at all. `intRef` is proposed with the snapshot's Intelligence Index
-version because the registry has no version column.
+`intRef` is proposed with the snapshot's Intelligence Index version because the
+registry has no version column.
 
 #### Price drift
 
@@ -445,10 +460,10 @@ outranks the best scored model it was calibrated against. Routing applies the
 tier floor to the estimated value and labels every reason it produces
 (`intelligence ≈53.9 (AA estimate, n=6, r=0.95) >= floor 45`).
 
-The snapshot is `data/aa-snapshot-pro.json` when present, else
-`data/aa-snapshot.json`; `--aa-snapshot`/`AGENTQ_AA_SNAPSHOT` overrides it. A
-missing or malformed snapshot only disables estimates — it never fails a
-catalog read. Estimates are a routing aid, not a measurement: `aa-propose` and
+The snapshot is `$AGENTQ_HOME/data/aa-snapshot.json`;
+`--aa-snapshot`/`AGENTQ_AA_SNAPSHOT` overrides it. A leftover
+`aa-snapshot-pro.json` from an older `aa-sync` is ignored. A missing or
+malformed snapshot only disables estimates — it never fails a catalog read. Estimates are a routing aid, not a measurement: `aa-propose` and
 the registry remain how a model actually becomes scored.
 
 #### Pricing an estimated model

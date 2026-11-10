@@ -25,7 +25,7 @@ const EMPTY_INDICES = {
   artificial_analysis_economics_index: null,
 };
 
-/** One Free-tier model record. */
+/** One model record as the Free endpoint returns it. */
 function freeModel({
   id = 'id-grok-4-6',
   name = 'Grok 4.6',
@@ -70,9 +70,8 @@ function freeModel({
 }
 
 /** One page of the response envelope. */
-function page(data, { page: number = 1, totalPages = 1, version = 4.1, tier = 'free' } = {}) {
+function page(data, { page: number = 1, totalPages = 1, version = 4.1 } = {}) {
   return {
-    tier,
     intelligence_index_version: version,
     pagination: { page: number, page_size: 200, total_pages: totalPages, has_more: number < totalPages },
     data,
@@ -124,8 +123,12 @@ function freePages() {
   ];
 }
 
-/** One Pro page: per-benchmark evaluations as fractions. */
-function proPage() {
+/**
+ * A page whose models carry the per-benchmark evaluation keys. The Free
+ * endpoint does not send these (0 of 726 models on 2026-11-08); the fixture
+ * exists so the refusal policy is pinned even if AA ever starts to.
+ */
+function extraEvaluationsPage() {
   return page([
     freeModel({
       id: 'id-opus-5-5',
@@ -151,7 +154,7 @@ function proPage() {
         aa_omniscience_accuracy: 0.323,
       },
     }),
-  ], { tier: 'pro' });
+  ]);
 }
 
 /**
@@ -197,7 +200,7 @@ module.exports = {
   freeModel,
   page,
   freePages,
-  proPage,
+  extraEvaluationsPage,
   previewPage,
   pinnedPage,
   nameTiePage,

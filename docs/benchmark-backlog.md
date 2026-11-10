@@ -13,9 +13,10 @@ Workflow when new data arrives: edit `$AGENTQ_HOME/data/benchmark-inputs.json`
 
 `npm run aa-propose` automates the Artificial Analysis part of that: it proposes
 AA-sourced values for a runnable that cannot score yet, refuses the columns
-marked unsafe below, and never overwrites a value already in the registry. Only
-the eight `AA_fetch` fields are importer parity; the Pro per-benchmark columns
-need `--include-benchmarks` and are printed as UNVERIFIED (see
+marked unsafe below, and never overwrites a value already in the registry. It
+covers only the eight `AA_fetch` fields, because the Free catalog carries no
+per-benchmark evaluations and this project has no Pro access; the six benchmark
+columns below need the AA website or manual research (see
 [roi-tracker.md](roi-tracker.md#artificial-analysis-snapshots-and-score-proposals)).
 
 ## One value away from ranking
