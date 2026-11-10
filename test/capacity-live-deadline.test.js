@@ -5,6 +5,7 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const { ownStderr } = require('./helpers/stderr.js');
 const helper = path.resolve(__dirname, '../bin/capacity-live.js');
 
 function run(body) {
@@ -19,7 +20,7 @@ test('a stalled helper exits itself without relying on a parent timeout', () => 
   assert.equal(result.signal, null);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
-  assert.equal(result.stderr, '');
+  assert.equal(ownStderr(result.stderr), '');
 });
 
 test('the deadline remains active after the parent exits', async () => {
@@ -43,7 +44,7 @@ test('completed helpers clear their deadline and exit successfully', () => {
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0);
   assert.equal(result.stdout, 'ok');
-  assert.equal(result.stderr, '');
+  assert.equal(ownStderr(result.stderr), '');
 });
 
 test('CLI flushes summaries and closes retained handles on success and failure', () => {
@@ -62,7 +63,7 @@ test('CLI flushes summaries and closes retained handles on success and failure',
       assert.equal(result.error, undefined);
       assert.equal(result.status, failing ? 1 : 0);
       assert.equal(result.stdout, failing ? '' : JSON.stringify({ go: { state: 'unknown' } }));
-      assert.equal(result.stderr, '');
+      assert.equal(ownStderr(result.stderr), '');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }
 });
@@ -72,5 +73,5 @@ test('failed helpers clear their deadline without exposing diagnostics', () => {
   assert.equal(result.error, undefined);
   assert.equal(result.status, 2);
   assert.equal(result.stdout, '');
-  assert.equal(result.stderr, '');
+  assert.equal(ownStderr(result.stderr), '');
 });

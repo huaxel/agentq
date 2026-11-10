@@ -37,6 +37,7 @@ const path = require('node:path');
 const { admit } = require('../../core/admission.js');
 const { rank } = require('../../core/routing.js');
 const { storedTier } = require('../../core/auto-model.js');
+const { modelChosenEvent, optionRoles } = require('../../lib/model-choice.js');
 const {
   TIERS,
   assertKnownArgs,
@@ -269,23 +270,6 @@ function assertDispatchableModel(model, deps) {
     );
   }
   return entry;
-}
-
-/**
- * The roles a model plays in the shortlist the routing core just returned.
- *
- * Empty when the model is not on it, and always empty for a pin (a pin is not
- * re-routed). For a caller-chosen model the shortlist is read only to record
- * which option the caller took; it never changes the model.
- *
- * @param {Record<string, any>|null|undefined} decision
- * @param {string} model
- * @returns {string[]}
- */
-function optionRoles(decision, model) {
-  const options = Array.isArray(decision && decision.options) ? decision.options : [];
-  const option = options.find((candidate) => candidate && candidate.id === model);
-  return option && Array.isArray(option.roles) ? [...option.roles] : [];
 }
 
 /**
@@ -556,6 +540,10 @@ function buildDispatchTools(deps) {
         const logPath = path.join(deps.logsDir, `dispatch-${id8}-${clock()}.log`);
         const spawnArgs = [deps.cliPath, '--db', deps.dbPath, '--worker-id', workerId, 'run', '--id', id];
         if (resolved.passModel) spawnArgs.push('--model', resolved.model);
+        // The worker records its own `model-chosen` event when it claims the
+        // task; handing it the tier this decision used keeps that second record
+        // at the same tier, so `review_task` reads one tier back either way.
+        spawnArgs.push('--tier', tier);
         if (deps.sandbox) spawnArgs.push('--sandbox', deps.sandbox);
         if (deps.verify) spawnArgs.push('--verify', deps.verify);
         if (deps.allowUntrusted) spawnArgs.push('--allow-untrusted');
@@ -627,7 +615,7 @@ function buildDispatchTools(deps) {
         // store failure is reported and never turns a dispatch into an error:
         // the log and the response still say what was started.
         try {
-          deps.recordTaskEvent(id, 'model-chosen', {
+          deps.recordTaskEvent(id, 'model-chosen', modelChosenEvent({
             model: resolved.model,
             // The tier the model was chosen for. A later outcome review reads
             // it back (review_task), so the record lands at the right tier
@@ -636,7 +624,7 @@ function buildDispatchTools(deps) {
             chosenBy: resolved.chosenBy,
             roles: resolved.roles,
             dataSharing: resolved.dataSharing === true,
-          });
+          }));
         } catch (error) {
           process.stderr.write(
             `agentq-mcp: could not record the model choice for ${id}: ${error?.message ?? error}\n`,

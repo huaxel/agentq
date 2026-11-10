@@ -9,6 +9,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const { githubEnv, snapshotForIssue } = require('./helpers/pinned-issue.js');
 const { emitResult, resultPayload } = require('./helpers/result-file.js');
+const { ownStderr } = require('./helpers/stderr.js');
 const { CHEAP_MODEL, STRONG_MODEL, quotaFixture, writeRoutingFixture } = require('./helpers/routing-fixture.js');
 const AGENTQ = require.resolve('../src/interfaces/cli/agentq.js');
 const { resolveExecutor, parseArgs, formatModelRow, formatJobBlock, summarizeCosts, truncateRepo } = require('../src/interfaces/cli/agentq.js');
@@ -756,7 +757,7 @@ test('--help works after any command', () => {
     const result = run(args);
     assert.equal(result.exitCode, 0, `${args.join(' ')}: ${result.stderr}`);
     assert.match(result.stdout, /Usage/);
-    assert.equal(result.stderr, '');
+    assert.equal(ownStderr(result.stderr), '');
   }
   const bogus = run(['review', '--bogus']);
   assert.notEqual(bogus.exitCode, 0);
@@ -2260,6 +2261,82 @@ echo "$2" > ${JSON.stringify(seenModel)}
   assert.equal(result.exitCode, 0, result.stderr);
   assert.equal(fs.readFileSync(seenModel, 'utf8').trim(), CHEAP_MODEL);
   assert.equal(jobs(db)[0].model, CHEAP_MODEL);
+});
+
+// --- W25: a local claim records its model decision ---
+
+/** The `model-chosen` payloads of a task, oldest first. */
+function modelChoices(dbPath, id) {
+  return taskEvents(dbPath, id)
+    .filter((event) => event.event === 'model-chosen')
+    .map((event) => event.payload);
+}
+
+test('run --id with an explicit --model records chosenBy caller', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const executor = makeExecutor(root, '#!/usr/bin/env bash\necho ran\n');
+
+  const { id } = JSON.parse(run(['--db', db, 'enqueue', '--repo', repo, '--issue', '21', '--model', 'stored/model', '--trusted', '--json']).stdout);
+  const result = run(['--db', db, 'run', '--id', id, '--model', 'override/model', '--executor', executor, '--json']);
+  assert.equal(result.exitCode, 0, result.stderr);
+
+  assert.deepEqual(modelChoices(db, id), [{
+    model: 'override/model',
+    tier: 'medium',
+    chosenBy: 'caller',
+    roles: [],
+    dataSharing: false,
+  }]);
+});
+
+test('run --id without --model records the stored model as pinned', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const executor = makeExecutor(root, '#!/usr/bin/env bash\necho ran\n');
+
+  const { id } = JSON.parse(run(['--db', db, 'enqueue', '--repo', repo, '--issue', '22', '--model', 'stored/model', '--trusted', '--json']).stdout);
+  const result = run(['--db', db, 'run', '--id', id, '--executor', executor, '--json']);
+  assert.equal(result.exitCode, 0, result.stderr);
+
+  assert.deepEqual(modelChoices(db, id), [{
+    model: 'stored/model',
+    tier: 'medium',
+    chosenBy: 'pinned',
+    roles: [],
+    dataSharing: false,
+  }]);
+});
+
+test('run --id on an auto task records the routed model, its tier and its roles', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const fixture = writeRoutingFixture();
+  const executor = makeExecutor(root, '#!/usr/bin/env bash\necho ran\n');
+
+  const enqueued = run(
+    ['--db', db, 'enqueue', '--repo', repo, '--issue', '23', '--model', 'auto', '--tier', 'big', '--trusted', '--json'],
+    fixture.env(),
+  );
+  assert.equal(enqueued.exitCode, 0, enqueued.stderr);
+  const { id } = JSON.parse(enqueued.stdout);
+
+  const result = run(['--db', db, 'run', '--id', id, '--executor', executor, '--json'], fixture.env());
+  assert.equal(result.exitCode, 0, result.stderr);
+
+  const [choice] = modelChoices(db, id);
+  assert.equal(choice.model, STRONG_MODEL);
+  assert.equal(choice.chosenBy, 'auto');
+  assert.equal(choice.tier, 'big', 'the tier the task was enqueued with');
+  assert.deepEqual(
+    choice.roles,
+    ['cheapest', 'smartest', 'expiring', 'best-value'],
+    'the shortlist roles of the chosen model',
+  );
+  assert.equal(choice.dataSharing, false);
 });
 
 test('run --id on a task that is not pending fails instead of running the next one', () => {

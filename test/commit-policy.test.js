@@ -18,6 +18,7 @@ const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
 const { githubEnv, taskInputForIssue } = require('./helpers/pinned-issue.js');
+const { ownStderr } = require('./helpers/stderr.js');
 const { SqliteSource } = require('./helpers/pinned-issue.js');
 const {
   executeJob, commitPolicyOf, resolveCommitAuthor,
@@ -157,9 +158,7 @@ test('CLI: --commit-author is parsed and stored; a malformed value is refused', 
     assert.match(refused.stderr, /--commit-author/, `expected a --commit-author error for ${bad}`);
     // Node's own warnings (Node 22 flags node:sqlite as experimental) are not
     // agentq output; the agentq error itself must be one line.
-    const own = refused.stderr.trim().split('\n')
-      .filter((line) => !/^\(node:\d+\) \w*Warning:|^\(Use `node --trace-warnings/.test(line));
-    assert.equal(own.length, 1, 'the error is one line');
+    assert.equal(ownStderr(refused.stderr).split('\n').length, 1, 'the error is one line');
     assert.doesNotMatch(refused.stderr, /GitHub/, 'the policy is refused before any issue capture');
   }
 });

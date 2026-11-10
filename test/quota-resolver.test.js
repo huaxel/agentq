@@ -18,6 +18,7 @@ const {
   quotaFixture,
   writeRoutingFixture,
 } = require('./helpers/routing-fixture.js');
+const { ownStderr } = require('./helpers/stderr.js');
 
 const RESOLVER = path.join(__dirname, '..', 'src', 'lib', 'quota-resolver.js');
 
@@ -39,7 +40,7 @@ test('plain --tier prints only the model id on stdout', () => {
   const result = run(['--tier', 'medium'], fixture);
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout.trim(), CHEAP_MODEL);
-  assert.equal(result.stderr, '');
+  assert.equal(ownStderr(result.stderr), '');
 });
 
 test('--json --tier keeps the fields the shell wrappers read', () => {

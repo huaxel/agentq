@@ -115,6 +115,10 @@ where `chosenBy` is `caller`, `pinned` or `auto` and `roles` are the shortlist r
 model played (`[]` when it was not on the shortlist, which is always the case for a pin or
 a caller-chosen model: those are not re-routed).
 
+The spawned worker records its own claim with the same event shape, on the tier the
+dispatch used (the server passes `--tier` along): it is a new claim, so it gets its own
+record, and both say the same model and tier.
+
 ### Quota freshness
 
 Quota older than six hours is unknown, so a server that has been idle would

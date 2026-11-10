@@ -15,6 +15,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const { runOnce, runAsync, prepareJobWorktree } = require('../src/runners/execute.js');
+const { ownStderr } = require('./helpers/stderr.js');
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'execute-runner-'));
@@ -33,7 +34,7 @@ for (const appendOutput of [false, true]) {
     });
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, 'new evidence');
-    assert.equal(result.stderr, '');
+    assert.equal(ownStderr(result.stderr), '');
     assert.equal(fs.readFileSync(outputPath, 'utf8'), appendOutput
       ? 'prior evidence without trailing newline\n--- next attempt ---\nnew evidence'
       : 'new evidence');

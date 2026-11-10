@@ -303,7 +303,7 @@ test('dispatch_task routes when the task has no pinned model or asks for auto', 
   const routed = tool('dispatch_task', autoTask.deps).handler({ id: 't1', tier: 'big' });
   assert.equal(routed.model, 'gpt-5');
   assert.deepEqual(autoTask.calls.recommend, [{ tier: 'big' }]);
-  assert.deepEqual(autoTask.calls.spawn[0].args.slice(-3), ['--model', 'gpt-5', '--json']);
+  assert.deepEqual(autoTask.calls.spawn[0].args.slice(-5), ['--model', 'gpt-5', '--tier', 'big', '--json']);
 
   const noModel = fakeDeps({ getTask: () => trustedTask({ model: null }) });
   assert.equal(tool('dispatch_task', noModel.deps).handler({ id: 't1' }).model, 'gpt-5');
@@ -554,7 +554,7 @@ test('dispatch_task spawns a detached agentq run --id with the dispatch worker i
   assert.equal(call.command, process.execPath);
   assert.deepEqual(call.args, [
     deps.cliPath, '--db', deps.dbPath, '--worker-id', 'local-testhost-dispatch-4242',
-    'run', '--id', 'abcdef12-3456-7890-abcd-ef1234567890', '--json',
+    'run', '--id', 'abcdef12-3456-7890-abcd-ef1234567890', '--tier', 'medium', '--json',
   ]);
   assert.equal(call.options.detached, true);
   assert.deepEqual(call.options.stdio.slice(0, 1), ['ignore']);
@@ -576,8 +576,9 @@ test('dispatch_task forwards only the server-side boundary flags', () => {
     allowUntrusted: true,
   });
   tool('dispatch_task', deps).handler({ id: 't1', model: 'gpt-5' });
-  assert.deepEqual(calls.spawn[0].args.slice(-8), [
+  assert.deepEqual(calls.spawn[0].args.slice(-10), [
     '--model', 'gpt-5',
+    '--tier', 'medium',
     '--sandbox', '/usr/local/bin/agentq-sandbox',
     '--verify', 'npm test',
     '--allow-untrusted',

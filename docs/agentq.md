@@ -216,6 +216,16 @@ the routing core before the claim, so the audit row records the concrete model
 that ran. When the override replaces a different stored model, the `claimed`
 task event keeps `previous_model` and `previous_provider` alongside it.
 
+Every claim by `run --id`, `run-next` or `drain` also records a
+`model-chosen` event for that claim — `{ model, tier, chosenBy, roles,
+dataSharing }`, the same shape `dispatch_task` writes. `chosenBy` is `caller`
+when `--model` named the model (and it is not `auto`), `pinned` when the
+task's stored model was used as-is, and `auto` when the routing core picked
+it. `roles` are the model's shortlist roles from that routing decision (`[]`
+when nothing was routed), and `dataSharing` comes from the same decision. A
+retry that re-resolves writes another event: it is a new decision.
+`agentq show --id` lists them newest last; `review_task` reads the latest.
+
 `--worker-id` (or `AGENTQ_WORKER_ID`) names the local claim identity (default `local-<host>-<pid>`).
 Only two shapes are accepted in local mode: `local-<host>-<pid>` and
 `local-<host>-dispatch-<pid>`; anything else is a usage error (exit `2`). The

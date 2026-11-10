@@ -7,6 +7,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const test = require('node:test');
 const { buildReadTools, TASK_STATUSES } = require('../src/interfaces/mcp/tools.js');
+const { ownStderr } = require('./helpers/stderr.js');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'agentq-mcp.js');
@@ -664,7 +665,7 @@ test('bin/agentq-mcp.js --help prints usage and exits zero', async () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout, /agentq MCP server \(read-only, stdio\)/);
   assert.match(result.stdout, /AGENTQ_ORCHESTRATOR_DB/);
-  assert.equal(result.stderr, '');
+  assert.equal(ownStderr(result.stderr), '');
 });
 
 // --- private work and the price-table gap report (W16) ----------------------

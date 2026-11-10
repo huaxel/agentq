@@ -28,7 +28,7 @@ const {
 const { attributePath } = require('../lib/path-attribution.js');
 const { loadConfig } = require('../lib/model-picker.js');
 const { homeDataPath } = require('../lib/home.js');
-const { resolveAutoModel: resolveAutoModelFor, storedTier } = require('../core/auto-model.js');
+const { resolveAutoModel: resolveAutoModelFor, normalizeTier, storedTier } = require('../core/auto-model.js');
 const { loadPathHealth } = require('./path-health.js');
 const { loadTrackRecords } = require('./track-records.js');
 const {
@@ -39,6 +39,7 @@ const {
   removePidFile,
 } = require('./job-state.js');
 const { canonicalizePath } = require('../lib/paths.js');
+const { modelChosenEvent, optionRoles } = require('../lib/model-choice.js');
 const {
   claimNextTask,
   claimTaskById,
@@ -373,6 +374,78 @@ function localWorkerIdError(workerId, hostname = os.hostname()) {
 }
 
 /**
+ * The tier a claim resolved at, for the `model-chosen` event.
+ *
+ * A routed claim carries the normalized tier it used. An explicit model is
+ * resolved at no tier at all, so the record keeps the tier the claim asked for
+ * (the task's stored tier, else the CLI's). An unknown tier is left out rather
+ * than failing a claim that is already committed.
+ *
+ * @param {Record<string, any>|null} resolved
+ * @param {string|null|undefined} tier
+ * @returns {string|null}
+ */
+function claimTier(resolved, tier) {
+  if (resolved && typeof resolved.tier === 'string' && resolved.tier) return resolved.tier;
+  try {
+    return normalizeTier(tier);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `model-chosen` payload for one claim, or null when the task has no model
+ * to record.
+ *
+ * `resolved` is the routing result the claim used, when it had one: only an
+ * 'auto' model (or a feedback `--model` override) goes through
+ * `resolveAutoModel`, so an unrouted claim resolved nothing and is either the
+ * task's stored concrete model ('pinned') or the caller's `--model`
+ * ('caller').
+ *
+ * Roles come from the routing decision that produced the model — the claim
+ * path never runs a second routing pass to fill them — and `dataSharing` is
+ * that same decision's own flag. A claim that did not route has no decision to
+ * read, and the CLI claim path does not build a catalog (that would read the
+ * ROI/AA data an explicit model never touches), so it records `false`, the
+ * documented default for an unknown entry.
+ *
+ * @param {{ task: Record<string, any>, resolved?: Record<string, any>|null, requestedModel?: string|null, tier?: string|null }} input
+ * @returns {Record<string, any>|null}
+ */
+function claimModelChoice({ task, resolved = null, requestedModel = null, tier = null }) {
+  const model = resolved ? resolved.model : task?.model;
+  if (typeof model !== 'string' || model === '') return null;
+  const routed = resolved !== null && resolved.explicit === false;
+  return modelChosenEvent({
+    model,
+    chosenBy: routed ? 'auto' : requestedModel === null ? 'pinned' : 'caller',
+    roles: optionRoles(routed ? resolved.decision : null, model),
+    tier: claimTier(resolved, tier),
+    dataSharing: routed && resolved.default ? resolved.default.dataSharing === true : false,
+  });
+}
+
+/**
+ * Record one claim's model decision as a `model-chosen` task event.
+ *
+ * One event per claim: a retry that re-resolves is a new decision and writes
+ * its own.
+ *
+ * @param {Record<string, any>} db
+ * @param {{ id: string }} task
+ * @param {Record<string, any>|null} resolved
+ * @param {{ requestedModel?: string|null, tier?: string|null }} [options]
+ * @returns {Record<string, any>|null} the payload written, if any
+ */
+function recordModelChoice(db, task, resolved, options = {}) {
+  const payload = claimModelChoice({ task, resolved, ...options });
+  if (payload) createTaskEvent(db, task.id, 'model-chosen', payload);
+  return payload;
+}
+
+/**
  * JobSink over the SQLite task store.
  *
  * The source is not its own sink: executeJob's sink methods (claim/finish/
@@ -662,6 +735,15 @@ class SqliteSource {
 
     const refused = [];
     let routingError = null;
+    // The model the caller named for this claim, if any. Only a feedback
+    // worker's --model overrides the queue, and 'auto' is a routing request,
+    // not a choice, so it stays null there.
+    const callerModel = typeof modelOverride === 'string' && modelOverride.trim() && modelOverride !== 'auto'
+      ? modelOverride
+      : null;
+    // Resolution results by candidate id: claimNextTask resolves inside its
+    // scan, so this is how the claimed task's decision reaches the audit event.
+    const resolutions = new Map();
     const health = loadPathHealth(this.db);
     // Read once per claim, like health: the resolver runs per candidate, and a
     // per-candidate queue read would scale with the backlog. A caller that
@@ -669,7 +751,7 @@ class SqliteSource {
     const trackRecords = options.trackRecords ?? loadTrackRecords(this.db);
     const resolve = (storedModel, candidate) => {
       try {
-        return resolveAutoModelFor(storedModel, {
+        const resolved = resolveAutoModelFor(storedModel, {
           ...options,
           // A task enqueued with --tier routes at that tier even when this
           // drain did not pass one; an explicit --tier still wins.
@@ -677,6 +759,8 @@ class SqliteSource {
           pathHealth: health,
           trackRecords,
         });
+        resolutions.set(candidate.id, resolved);
+        return resolved;
       } catch (error) {
         routingError ??= error;
         throw error; // claimNextTask skips this candidate
@@ -702,7 +786,13 @@ class SqliteSource {
       localTaskSource: LOCAL_TASK_SOURCES,
     });
     this.refused = refused;
-    if (task) return taskToJob(task);
+    if (task) {
+      recordModelChoice(this.db, task, resolutions.get(task.id) ?? null, {
+        requestedModel: callerModel,
+        tier: options.tier ?? storedTier(task),
+      });
+      return taskToJob(task);
+    }
     // claimNextTask swallows routing failures to try the next candidate. When
     // nothing else was claimable, report the routing failure instead of an
     // idle queue: silently doing nothing hides a saturated/unmeasured path.
@@ -803,6 +893,13 @@ class SqliteSource {
       const after = getTask(this.db, id);
       throw new Error(`Job #${id} could not be claimed (status ${after?.status ?? 'unknown'}).`);
     }
+    // Audit how this claim's model was chosen. `requested` is the caller's
+    // --model for THIS claim; without one the stored model decided, which is
+    // either a pin or (for 'auto') a routed choice.
+    recordModelChoice(this.db, claimed, resolved, {
+      requestedModel: requested,
+      tier: options.tier ?? storedTier(task),
+    });
     return taskToJob(claimed);
   }
 
@@ -1080,6 +1177,11 @@ class SqliteSource {
       localTaskSource: LOCAL_TASK_SOURCES,
     });
     if (!claimed) return null; // superseded, budget spent, or another owner
+    // The retry is a new claim and a new model decision: record it, even when
+    // it resolved to the same model as the failed attempt.
+    recordModelChoice(this.db, { ...task, model: claimed.model }, resolved, {
+      tier: options.tier ?? storedTier(task),
+    });
     // The retry is a NEW claim with a fresh token: the caller must report the
     // completion under this claim, not the one that just failed. The provider
     // travels with it too: a retry can be routed to a different path, and the
