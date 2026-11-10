@@ -183,7 +183,10 @@ test('the adapter folds reviews and verify failures into records', () => {
     }
     dbModule.recordPathOutcome(db, { path: 'codex', model: UNSCORED_MODEL, taskId: 't9', outcome: 'verify_failed' });
 
-    const records = loadTrackRecords(db);
+    // Key resolution needs the runnables; pass the fixture's own so the test
+    // never falls back to the developer's real AGENTQ_HOME.
+    const { runnablesPath } = writeRoutingFixture();
+    const records = loadTrackRecords(db, { runnablesPath });
     const cheap = records.get('deepseek-v4-1-flash').get('medium');
     assert.equal(cheap.n, 11);
     assert.ok(Math.abs(cheap.lowerBound - wilsonLowerBound(11, 11)) < 1e-12);
@@ -193,7 +196,7 @@ test('the adapter folds reviews and verify failures into records', () => {
     assert.equal(unscored.rejected, 1);
 
     // The file variant agrees with the handle variant.
-    const fromFile = loadTrackRecordsFile(dbPath);
+    const fromFile = loadTrackRecordsFile(dbPath, { runnablesPath });
     assert.equal(fromFile.get('deepseek-v4-1-flash').get('medium').n, 11);
     assert.equal(loadReviewsFile(dbPath).length, 11);
     assert.equal(loadReviewsFile(path.join(root, 'absent.sqlite')).length, 0);
@@ -431,7 +434,7 @@ test('review_task records into a real queue and track_records reads it back', ()
       recommend: () => ({}),
       listTasks: () => [],
       getTask: () => null,
-      getTrackRecords: () => loadTrackRecords(db),
+      getTrackRecords: () => loadTrackRecords(db, { runnablesPath: writeRoutingFixture().runnablesPath }),
     };
     const stats = tool(buildReadTools(readDeps), 'track_records').handler({});
     assert.equal(stats.count, 2, 'medium inherits into small');
