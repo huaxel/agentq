@@ -77,6 +77,7 @@ function valid(overrides = {}) {
     usage: null,
     verification: null,
     stop: false,
+    unexpectedCommits: null,
     ...overrides,
   };
 }

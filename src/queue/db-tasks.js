@@ -216,6 +216,84 @@ function initSchema(db) {
   if (!taskCols.includes('callback_url')) {
     db.exec('ALTER TABLE tasks ADD COLUMN callback_url TEXT');
   }
+  if (!taskCols.includes('execution_policy')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN execution_policy TEXT');
+  }
+}
+
+/** Commit modes for a task's execution policy. */
+const COMMIT_MODES = Object.freeze(['agent', 'none']);
+
+/**
+ * The default commit mode for a task kind: spec tasks stay uncommitted for
+ * review, issue tasks keep today's agent-commits behaviour.
+ *
+ * @param {string|null|undefined} kind
+ * @returns {'agent'|'none'}
+ */
+function defaultCommitMode(kind) {
+  return kind === 'spec' ? 'none' : 'agent';
+}
+
+/**
+ * Parse a `Name <email>` author value strictly.
+ *
+ * @param {string} value
+ * @returns {{ name: string, email: string }}
+ */
+function parseCommitAuthor(value) {
+  const text = String(value ?? '').trim();
+  const match = /^(.*\S)\s+<([^<>\s@]+@[^<>\s@]+)>$/.exec(text);
+  if (!match) throw new Error('Invalid --commit-author: expected `Name <email>`.');
+  return { name: match[1].trim(), email: match[2] };
+}
+
+/**
+ * Normalize an execution policy to its stored shape.
+ *
+ * @param {Record<string, any>|null|undefined} policy
+ * @param {string|null|undefined} kind task kind, for the commit default
+ * @returns {{ commit: 'agent'|'none', author: { name: string, email: string }|null }}
+ */
+function normalizeExecutionPolicy(policy, kind = null) {
+  const input = policy && typeof policy === 'object' ? policy : {};
+  const commit = input.commit === undefined || input.commit === null
+    ? defaultCommitMode(kind)
+    : input.commit;
+  if (!COMMIT_MODES.includes(commit)) {
+    throw new Error(`Invalid commit mode: ${String(commit)} (expected one of ${COMMIT_MODES.join(', ')}).`);
+  }
+  let author = null;
+  if (input.author !== undefined && input.author !== null) {
+    const { name, email } = input.author;
+    if (typeof name !== 'string' || !name.trim()
+      || typeof email !== 'string' || !/^[^<>\s]+@[^<>\s]+$/.test(email.trim())) {
+      throw new Error('Invalid execution policy author: expected { name, email }.');
+    }
+    author = { name: name.trim(), email: email.trim() };
+  }
+  return { commit, author };
+}
+
+/**
+ * Read a task row's stored execution policy, or null when none was stored.
+ * An unreadable value is never fatal: the caller falls back to the default.
+ *
+ * @param {Record<string, any>} row
+ * @returns {{ commit: 'agent'|'none', author: { name: string, email: string }|null }|null}
+ */
+function executionPolicyOf(row) {
+  if (!row || row.execution_policy == null) return null;
+  try {
+    const parsed = typeof row.execution_policy === 'string'
+      ? JSON.parse(row.execution_policy)
+      : row.execution_policy;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!COMMIT_MODES.includes(parsed.commit)) return null;
+    return normalizeExecutionPolicy(parsed, null);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -379,6 +457,11 @@ function createTask(db, task) {
   // One conversion point on the write path: a legacy issue snapshot and a
   // generic task input both end up stored in the generic shape.
   const pinnedInput = pinTaskInput(task);
+  // The execution policy is the orchestrator's choice of how to run the task
+  // (like the tier), never part of the pinned input or its digest.
+  const executionPolicy = task.execution_policy === undefined || task.execution_policy === null
+    ? null
+    : normalizeExecutionPolicy(task.execution_policy, task.kind);
 
   try {
     db.exec('BEGIN IMMEDIATE');
@@ -386,9 +469,9 @@ function createTask(db, task) {
     db.prepare(`
       INSERT INTO tasks (id, kind, status, priority, source, repo, issue_num,
                          base_branch, prompt, depends_on, model, provider, executor,
-                         routing_policy, callback_url, trust_level, approval_required,
+                         routing_policy, callback_url, execution_policy, trust_level, approval_required,
                          max_attempts, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       task.kind || 'prompt',
@@ -405,6 +488,7 @@ function createTask(db, task) {
       task.executor || null,
       json(task.routing_policy),
       task.callback_url || null,
+      json(executionPolicy),
       task.trust_level || 'agent',
       task.approval_required ? 1 : 0,
       task.max_attempts > 0 ? task.max_attempts : 3,
@@ -1790,6 +1874,11 @@ module.exports = {
   LOCAL_TASK_SOURCES,
   localSourcesOf,
   MIN_ID_PREFIX,
+  COMMIT_MODES,
+  defaultCommitMode,
+  parseCommitAuthor,
+  normalizeExecutionPolicy,
+  executionPolicyOf,
   getTask,
   listTasks,
   listRunningTasks,

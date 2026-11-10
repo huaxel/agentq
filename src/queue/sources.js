@@ -44,9 +44,13 @@ const {
   claimTaskById,
   completeTask,
   createTask,
+  defaultCommitMode,
+  executionPolicyOf,
   failTask,
   getTask,
   LOCAL_TASK_SOURCES,
+  normalizeExecutionPolicy,
+  parseCommitAuthor,
   initSchema,
   createTaskEvent,
   listTasks,
@@ -117,6 +121,17 @@ function taskSubject(taskInput) {
 }
 
 /**
+ * The task kind an enqueue request asks for, decided from the flags alone (no
+ * capture), so the commit policy can be validated before gh or a file is read.
+ *
+ * @param {Record<string, any>} options
+ * @returns {'spec'|'github_issue'}
+ */
+function enqueueKind(options) {
+  return typeof options.spec === 'string' && options.spec.trim() !== '' ? 'spec' : 'github_issue';
+}
+
+/**
  * Resolve what an enqueue request is for.
  *
  * Exactly one of `--issue` or `--spec` is required. A spec is read now, at
@@ -129,7 +144,7 @@ function taskSubject(taskInput) {
  * @returns {{ kind: string, issue: number|null, taskInput: Record<string, any> }}
  */
 function enqueueInput(options, repo, issueRunner) {
-  const hasSpec = typeof options.spec === 'string' && options.spec.trim() !== '';
+  const hasSpec = enqueueKind(options) === 'spec';
   const hasIssue = options.issue !== undefined && options.issue !== null && options.issue !== '';
   if (hasSpec === hasIssue) {
     throw new Error(hasSpec
@@ -183,11 +198,38 @@ function taskToJob(task) {
     log_path: completion.log ?? null,
     verified: completion.verified ?? null,
     verification: completion.verification ?? null,
+    unexpected_commits: completion.unexpected_commits ?? completion.unexpectedCommits ?? null,
     attempts: task.attempts,
     max_attempts: task.max_attempts,
     claimed_by: task.claimed_by ?? null,
     claim_token: task.claim_token ?? null,
+    execution_policy: executionPolicyOf(task),
   };
+}
+
+/**
+ * Resolve the execution (commit) policy for an enqueue request.
+ *
+ * `--commit` and `--no-commit` are mutually exclusive; the default is `none`
+ * for spec tasks and `agent` for everything else. `--commit-author` parses
+ * strictly to `{ name, email }`.
+ *
+ * @param {Record<string, any>} options CLI-style options (`commit`, `noCommit`, `commitAuthor`)
+ * @param {string} kind the resolved task kind
+ * @returns {{ commit: 'agent'|'none', author: { name: string, email: string }|null }}
+ */
+function enqueueExecutionPolicy(options = {}, kind) {
+  if (options.commit && options.noCommit) {
+    throw new Error('enqueue accepts only one of --commit or --no-commit, not both');
+  }
+  let commit;
+  if (options.commit) commit = 'agent';
+  else if (options.noCommit) commit = 'none';
+  else commit = defaultCommitMode(kind);
+  const author = options.commitAuthor === undefined || options.commitAuthor === null
+    ? null
+    : parseCommitAuthor(options.commitAuthor);
+  return normalizeExecutionPolicy({ commit, author }, kind);
 }
 
 /** Split `--depends-on` into task-id tokens (full ids or unique prefixes). */
@@ -381,6 +423,7 @@ class SqliteJobSink {
       verified: result.verified,
       verification: result.verification,
       stop: result.stop,
+      unexpected_commits: result.unexpectedCommits ?? null,
       result_file: result.resultFile ?? null,
       completion_id: completionId,
     }, {
@@ -523,6 +566,9 @@ class SqliteSource {
     const trusted = !options.untrusted && !!options.trusted;
     const deps = parseDependencyIds(options.dependsOn).map((dep) => resolveTaskId(this.db, dep));
     const config = loadConfig();
+    // Validate the commit policy before any capture: a malformed
+    // --commit-author must be refused without touching gh or the spec file.
+    const executionPolicy = enqueueExecutionPolicy(options, enqueueKind(options));
     // Capture before creating the task: a failed gh call or spec read must not
     // leave a half-created job behind, and a bad dependency id must not spend
     // a capture first.
@@ -536,6 +582,7 @@ class SqliteSource {
       base_branch: base,
       prompt: JSON.stringify(taskInput),
       routing_policy: options.tier ? { tier: options.tier } : null,
+      execution_policy: executionPolicy,
       model,
       provider: model === 'auto' ? null : attributePath(config, model).pathId,
       executor: options.executor ? path.resolve(options.executor) : null,
@@ -1142,6 +1189,7 @@ class OrchestratorSource {
     if (!options.repo) throw new Error('enqueue requires --repo');
     const repo = path.resolve(options.repo);
     if (!fs.existsSync(repo)) throw new Error(`Repo path does not exist: ${repo}`);
+    const executionPolicy = enqueueExecutionPolicy(options, enqueueKind(options));
     const { kind, issue, taskInput } = enqueueInput(options, repo, this.issueRunner);
 
     const model = options.model || 'auto';
@@ -1159,6 +1207,7 @@ class OrchestratorSource {
       model,
       provider,
       routing_policy: options.tier ? { tier: options.tier } : null,
+      execution_policy: executionPolicy,
       prompt: JSON.stringify(taskInput),
       executor: options.executor ? path.resolve(options.executor) : null,
       trust_level: trustLevel,
@@ -1186,6 +1235,7 @@ class OrchestratorSource {
       verified: result.verified,
       verification: result.verification,
       stop: result.stop,
+      unexpected_commits: result.unexpectedCommits ?? null,
       result_file: result.resultFile ?? null,
     });
     // The server owns the stored status; there is no local completion receipt.
@@ -1233,6 +1283,7 @@ module.exports = {
   pidAlive,
   localWorkerIdError,
   LOCAL_TASK_SOURCES,
+  enqueueExecutionPolicy,
   SqliteSource,
   OrchestratorSource,
 };

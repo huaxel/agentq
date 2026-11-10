@@ -23,6 +23,7 @@ const path = require('node:path');
 const { spawnSync, spawn, execFileSync } = require('node:child_process');
 const { captureGitSnapshot } = require('./verification-evidence.js');
 const { RESULT_FILE_ENV, createResultPath, readResultFile } = require('./result-file.js');
+const { parseCommitAuthor } = require('../queue/db-tasks.js');
 const { validateTaskJob } = require('../core/task-input.js');
 const { admit } = require('../core/admission.js');
 const { loadRunnables, harnessForModel } = require('../core/catalog.js');
@@ -352,6 +353,70 @@ function sinkWorkArea(sink) {
   return null;
 }
 
+/**
+ * The commit policy for a job, tolerant of every job shape.
+ *
+ * Local claims project the row through taskToJob (an object), while the
+ * orchestrator returns the raw row (a JSON string, or nothing on old rows).
+ * Anything unreadable falls back to today's behaviour: the agent commits.
+ *
+ * @param {Record<string, any>} job
+ * @returns {{ commit: 'agent'|'none', author: { name: string, email: string }|null }}
+ */
+function commitPolicyOf(job) {
+  let policy = job?.execution_policy;
+  if (typeof policy === 'string') {
+    try {
+      policy = JSON.parse(policy);
+    } catch {
+      policy = null;
+    }
+  }
+  if (!policy || typeof policy !== 'object') return { commit: 'agent', author: null };
+  const author = policy.author
+    && typeof policy.author.name === 'string' && policy.author.name.trim()
+    && typeof policy.author.email === 'string' && policy.author.email.trim()
+    ? { name: policy.author.name.trim(), email: policy.author.email.trim() }
+    : null;
+  return { commit: policy.commit === 'none' ? 'none' : 'agent', author };
+}
+
+/**
+ * Resolve the git identity the agent commits under, in order:
+ *
+ * 1. The task's own author.
+ * 2. The target repo's `agentq.commitAuthor` git config, in `Name <email>`
+ *    form, so an owner sets a noreply identity once per repo with plain git
+ *    config.
+ * 3. Nothing: the repo's normal identity, as today.
+ *
+ * A key that is SET but malformed is fatal. The owner set it to keep their
+ * normal identity off agent commits, so silently falling back to that identity
+ * would defeat it. An unset key (git exits 1) means "no override".
+ *
+ * @param {{ name: string, email: string }|null} taskAuthor
+ * @param {string|null|undefined} repoPath
+ * @returns {{ name: string, email: string }|null}
+ */
+function resolveCommitAuthor(taskAuthor, repoPath) {
+  if (taskAuthor) return taskAuthor;
+  if (typeof repoPath !== 'string' || !repoPath) return null;
+  let raw;
+  try {
+    raw = execFileSync('git', ['-C', repoPath, 'config', '--get', 'agentq.commitAuthor'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+    }).trim();
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    return parseCommitAuthor(raw);
+  } catch {
+    throw new Error(`Invalid agentq.commitAuthor in ${repoPath}: expected \`Name <email>\`; refusing to run under the repo's default identity.`);
+  }
+}
+
 function isGitRepo(repo) {
   try {
     execFileSync('git', ['-C', repo, 'rev-parse', '--is-inside-work-tree'], {
@@ -563,6 +628,11 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
   let completionPersisted = false;
   try {
     const runCwd = prepareJobWorktree(sink, job);
+    // The commit policy travels with the task (taskToJob) or the raw row
+    // (orchestrator claims). Resolve the author here, not in the shell
+    // scripts, and hand both to the executor as environment.
+    const commitPolicy = commitPolicyOf(job);
+    const commitAuthor = resolveCommitAuthor(commitPolicy.author, job.repo_path || job.repo || null);
     const attemptId = randomUUID();
     // One fresh result path per attempt, inside a new 0700 directory under the
     // job's log directory: a retry must never read the previous attempt's
@@ -575,8 +645,15 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
       BASE_BRANCH: job.base_branch,
       AGENTQ_WORKTREE: runCwd,
       AGENTQ_JOB_ID: String(job.id),
+      AGENTQ_COMMIT_MODE: commitPolicy.commit,
       [RESULT_FILE_ENV]: resultPath,
     };
+    if (commitAuthor) {
+      env.GIT_AUTHOR_NAME = commitAuthor.name;
+      env.GIT_AUTHOR_EMAIL = commitAuthor.email;
+      env.GIT_COMMITTER_NAME = commitAuthor.name;
+      env.GIT_COMMITTER_EMAIL = commitAuthor.email;
+    }
     delete env.AGENTQ_PINNED_INPUT;
     delete env.AGENTQ_INPUT_SHA256;
     if (taskInput) {
@@ -715,6 +792,7 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
       verified,
       verification,
       stop,
+      unexpectedCommits: meta?.unexpectedCommits ?? null,
       // The sinks persist this as `result_file`; null means the executor
       // honoured the contract.
       resultFile: resultFileReason,
@@ -768,6 +846,8 @@ module.exports = {
   runVerify,
   trustedWorktreeLabel,
   isSafeBranchName,
+  commitPolicyOf,
+  resolveCommitAuthor,
   prepareJobWorktree,
   isGitRepo,
   sleep,

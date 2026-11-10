@@ -53,7 +53,7 @@ const SAVED_WORKFLOWS_DIR = path.join(os.homedir(), '.pi', 'workflows', 'saved')
 
 function usage() {
   return `Usage:
-  node bin/agentq.js [global opts] enqueue --repo PATH (--issue N | --spec FILE) [--model MODEL] [--tier T] [--base BRANCH] [--depends-on ID[,ID...]] [--trusted] [--json]
+  node bin/agentq.js [global opts] enqueue --repo PATH (--issue N | --spec FILE) [--model MODEL] [--tier T] [--base BRANCH] [--depends-on ID[,ID...]] [--trusted] [--commit|--no-commit] [--commit-author "Name <email>"] [--json]
   node bin/agentq.js [global opts] run-next [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
   node bin/agentq.js [global opts] run --id ID [--model MODEL|auto] [--tier T] [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
   node bin/agentq.js [global opts] drain [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
@@ -81,6 +81,12 @@ function usage() {
     the title (else the file name) and the whole file is the body. Exactly one
     of --issue or --spec is required. --tier is stored in routing_policy so a
     later dispatch, the model-chosen event and review_task agree on it.
+    Commit policy: --commit (the agent commits as it goes) and --no-commit
+    (leave everything uncommitted for review) are mutually exclusive. The
+    default is --no-commit for --spec tasks and --commit for --issue tasks.
+    --commit-author "Name <email>" sets the git identity the agent commits
+    under; otherwise the repo's agentq.commitAuthor git config applies, else
+    the repo's normal identity.
 
   Executor selection:
     The runnable's harness picks the executor (pi -> pi-task.sh,
@@ -204,6 +210,9 @@ function parseArgs(argv) {
     else if (flag === '--depends-on') options.dependsOn = needValue(args, flag);
     else if (flag === '--untrusted') options.untrusted = true;
     else if (flag === '--trusted') options.trusted = true;
+    else if (flag === '--commit') options.commit = true;
+    else if (flag === '--no-commit') options.noCommit = true;
+    else if (flag === '--commit-author') options.commitAuthor = needValue(args, flag);
     else if (flag === '--allow-untrusted') options.allowUntrusted = true;
     else if (flag === '--force') options.force = true;
     else if (flag === '--executor') options.executor = needValue(args, flag);

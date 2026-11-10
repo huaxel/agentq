@@ -237,6 +237,11 @@ function buildWriteTools(deps) {
             default: 'auto',
             description: 'Model id, or "auto" to let the claimer route by capacity. Defaults to "auto".',
           },
+          commit: {
+            type: 'string',
+            enum: ['agent', 'none'],
+            description: 'Commit policy: "agent" commits as it goes, "none" leaves everything uncommitted for review. Defaults to "none" for kind "spec", "agent" otherwise. No author can be set over MCP.',
+          },
           priority: {
             type: 'integer',
             minimum: -100,
@@ -256,10 +261,22 @@ function buildWriteTools(deps) {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       handler(args) {
-        assertKnownArgs(args, ['kind', 'repo', 'issue', 'prompt', 'title', 'body', 'model', 'priority', 'depends_on']);
+        // A caller must never choose the identity commits are made under.
+        // Checked before the known-args gate so every spelling reports the
+        // policy reason, not a generic unknown-argument error.
+        for (const field of ['author', 'commit_author', 'commitAuthor', 'commit-author']) {
+          if (args[field] !== undefined && args[field] !== null) {
+            throw invalidArgument(`enqueue_task does not accept an author: commits never run under a caller-chosen identity (got '${field}')`);
+          }
+        }
+        assertKnownArgs(args, ['kind', 'repo', 'issue', 'prompt', 'title', 'body', 'model', 'priority', 'depends_on', 'commit']);
         const kind = optionalEnum(args, 'kind', ENQUEUE_KINDS);
         if (!kind) throw invalidArgument(`kind is required and must be one of: ${ENQUEUE_KINDS.join(', ')}`);
         const repo = requiredRepoPath(args, 'repo');
+        // Same defaults by kind as the CLI: spec tasks stay uncommitted.
+        const commit = args.commit === undefined || args.commit === null
+          ? (kind === 'spec' ? 'none' : 'agent')
+          : optionalEnum(args, 'commit', ['agent', 'none']);
         const issue = optionalNumber(args, 'issue', { min: 1, integer: true });
         const priority = optionalNumber(args, 'priority', { min: -100, max: 100, integer: true }) ?? 0;
         const dependsOn = optionalTaskIds(args);
@@ -277,6 +294,7 @@ function buildWriteTools(deps) {
           model,
           priority,
           depends_on: dependsOn,
+          execution_policy: { commit, author: null },
           // Non-negotiable: no argument can change these three.
           source: 'mcp',
           trust_level: 'untrusted',

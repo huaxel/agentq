@@ -93,6 +93,18 @@ else
   echo "▶ reusing agentq-managed worktree"
 fi
 
+# Commit policy from the queue (AGENTQ_COMMIT_MODE=agent|none; unset means agent).
+# In none mode the agent must not commit: the reviewer commits under their own
+# identity. GIT_AUTHOR_*/GIT_COMMITTER_* arrive here in the environment when a
+# commit author is configured, and `env -u AGENTQ_RESULT` below passes them
+# through to the agent untouched (it only removes AGENTQ_RESULT).
+COMMIT_MODE="${AGENTQ_COMMIT_MODE:-agent}"
+if [ "$COMMIT_MODE" = none ]; then
+  COMMIT_LINE="Do NOT commit. Leave all changes uncommitted in the working tree for review."
+else
+  COMMIT_LINE="Make focused commits on this branch as you go."
+fi
+
 if [ "$input_source" = github ]; then
 read -r -d '' PROMPT <<EOF || true
 You are working in a fresh git worktree on branch ${branch}.
@@ -103,7 +115,7 @@ Issue #${ref}: ${title}
 ${body}
 
 Constraints:
-- Make focused commits on this branch as you go.
+- ${COMMIT_LINE}
 - Run the repo's tests/typecheck if present and make them pass.
 - Do NOT push and do NOT open a PR — leave the branch for review.
 EOF
@@ -118,7 +130,7 @@ Source: ${ref:-inline}
 ${body}
 
 Constraints:
-- Make focused commits on this branch as you go.
+- ${COMMIT_LINE}
 - Run the repo's tests/typecheck if present and make them pass.
 - Do NOT push and do NOT open a PR — leave the branch for review.
 EOF
@@ -185,20 +197,35 @@ else
   echo "  find it with: ls -t ~/.pi/agent/sessions | head -3"
 fi
 
+UNEXPECTED_FLAG=""
+if [ "$COMMIT_MODE" = none ]; then
+  echo "▶ uncommitted changes in working tree (no-commit mode):"
+  git -C "$wt" status --short || true
+  git -C "$wt" --no-pager diff --stat || true
+  UNEXPECTED_COMMITS="$(git -C "$wt" rev-list --count "${BASE}..HEAD" 2>/dev/null || echo 0)"
+  case "$UNEXPECTED_COMMITS" in ''|*[!0-9]*) UNEXPECTED_COMMITS=0 ;; esac
+  if [ "$UNEXPECTED_COMMITS" -gt 0 ]; then
+    echo "▶ WARNING: the agent committed ${UNEXPECTED_COMMITS} commit(s) despite no-commit mode; they are recorded in the result file." >&2
+    UNEXPECTED_FLAG="--unexpected-commits ${UNEXPECTED_COMMITS}"
+  fi
+else
 echo "▶ commits + diff on ${branch}:"
 git -C "$wt" --no-pager log  --oneline "${BASE}..HEAD" || true
 git -C "$wt" --no-pager diff --stat "${BASE}...HEAD" || true
+fi
 
 # Machine-readable result (AGENTQ_RESULT). JSON is encoded by node, never by
 # shell interpolation, and the file is replaced atomically. A failure to write
 # it leaves the run's metadata unknown, so it must not change the exit code.
 if [ -n "${AGENTQ_RESULT:-}" ]; then
+  # UNEXPECTED_FLAG is empty or exactly two words; word splitting is intended.
   if ! node "$RESULT_WRITER" \
     --worktree "$wt" \
     --branch "$branch" \
     --session "$SESSION" \
     --usage-file "$SESSION" \
-    --stop-from-file "$OUT_FILE"; then
+    --stop-from-file "$OUT_FILE" \
+    $UNEXPECTED_FLAG; then
     # Never leave a stale or partial file: agentq reads "missing" instead.
     rm -f "$AGENTQ_RESULT"
     echo "▶ could not write the agentq result file" >&2

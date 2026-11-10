@@ -19,7 +19,8 @@
  *
  *     { "version": 1, "worktree": string|null, "branch": string|null,
  *       "session": string|null, "usage": object|null,
- *       "verification": "passed"|"failed"|null, "stop": boolean }
+ *       "verification": "passed"|"failed"|null, "stop": boolean,
+ *       "unexpectedCommits": number|null }
  *
  *   atomically (tmp + rename in the same directory) using a JSON encoder, never
  *   shell string interpolation. agentq reads it, validates it here, and applies
@@ -44,6 +45,7 @@ const MAX_RESULT_FILE_BYTES = 64 * 1024;
 const MAX_TEXT_LENGTH = 4096;
 const RESULT_KEYS = Object.freeze([
   'version', 'worktree', 'branch', 'session', 'usage', 'verification', 'stop',
+  'unexpectedCommits',
 ]);
 const VERIFICATION_STATES = Object.freeze(['passed', 'failed']);
 
@@ -166,6 +168,13 @@ function validateResultFile(value) {
     return invalid(`verification must be one of ${VERIFICATION_STATES.join(', ')} or null`);
   }
 
+  // Commits the agent made in no-commit mode. Optional: absent reads as null.
+  const unexpectedCommits = value.unexpectedCommits == null ? null : value.unexpectedCommits;
+  if (unexpectedCommits !== null
+    && (!Number.isInteger(unexpectedCommits) || unexpectedCommits < 0)) {
+    return invalid('unexpectedCommits must be a non-negative integer or null');
+  }
+
   return {
     ok: true,
     value: {
@@ -176,6 +185,7 @@ function validateResultFile(value) {
       usage: normalizeUsage(value.usage),
       verification,
       stop: value.stop,
+      unexpectedCommits,
     },
   };
 }
@@ -370,7 +380,7 @@ function stopFromFile(file) {
 
 const CLI_FLAGS = Object.freeze([
   'worktree', 'branch', 'session', 'usage-file', 'usage-json', 'verification',
-  'stop', 'stop-from-file',
+  'stop', 'stop-from-file', 'unexpected-commits',
 ]);
 
 function parseCli(argv) {
@@ -392,7 +402,8 @@ function parseCli(argv) {
  *
  *   node src/runners/result-file.js --worktree W --branch B --session S \
  *     [--usage-file FILE | --usage-json JSON] [--verification passed|failed] \
- *     [--stop true|false | --stop-from-file CAPTURED-OUTPUT]
+ *     [--stop true|false | --stop-from-file CAPTURED-OUTPUT] \
+ *     [--unexpected-commits N]
  *
  * Writes $AGENTQ_RESULT. Without that variable (a standalone, supervised run)
  * it does nothing and exits 0.
@@ -407,6 +418,14 @@ function main(argv = process.argv.slice(2)) {
   if (options.stop !== undefined && !['true', 'false'].includes(options.stop)) {
     throw new Error(`--stop must be true or false, got ${options.stop}`);
   }
+  let unexpectedCommits = null;
+  if (options['unexpected-commits'] !== undefined) {
+    const count = Number(options['unexpected-commits']);
+    if (!Number.isInteger(count) || count < 0) {
+      throw new Error(`--unexpected-commits must be a non-negative integer, got ${options['unexpected-commits']}`);
+    }
+    unexpectedCommits = count;
+  }
   const stop = options['stop-from-file'] !== undefined
     ? stopFromFile(options['stop-from-file'])
     : options.stop === 'true';
@@ -418,6 +437,7 @@ function main(argv = process.argv.slice(2)) {
     usage,
     verification: options.verification ?? null,
     stop,
+    unexpectedCommits,
   });
   return 0;
 }

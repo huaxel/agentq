@@ -102,6 +102,20 @@ else
   echo "▶ reusing agentq-managed worktree"
 fi
 
+# Commit policy from the queue (AGENTQ_COMMIT_MODE=agent|none; unset means agent).
+# In none mode the agent must not commit: the reviewer commits under their own
+# identity. GIT_AUTHOR_*/GIT_COMMITTER_* arrive here in the environment when a
+# commit author is configured, and `env -u AGENTQ_RESULT` below passes them
+# through to the agent untouched (it only removes AGENTQ_RESULT).
+COMMIT_MODE="${AGENTQ_COMMIT_MODE:-agent}"
+if [ "$COMMIT_MODE" = none ]; then
+  COMMIT_LINE="Do NOT commit. Leave all changes uncommitted in the working tree for review."
+else
+  COMMIT_LINE="Make focused commits on this branch as you go."
+fi
+# Commits the agent made in none mode, counted after the run (empty = none).
+UNEXPECTED_COMMITS=""
+
 if [ "$input_source" = github ]; then
 read -r -d '' PROMPT <<EOF || true
 You are working in a fresh git worktree on branch ${branch}.
@@ -112,7 +126,7 @@ Issue #${ref}: ${title}
 ${body}
 
 Constraints:
-- Make focused commits on this branch as you go.
+- ${COMMIT_LINE}
 - Run the repo's tests/typecheck if present and make them pass.
 - Do NOT push and do NOT open a PR — leave the branch for review.
 EOF
@@ -127,7 +141,7 @@ Source: ${ref:-inline}
 ${body}
 
 Constraints:
-- Make focused commits on this branch as you go.
+- ${COMMIT_LINE}
 - Run the repo's tests/typecheck if present and make them pass.
 - Do NOT push and do NOT open a PR — leave the branch for review.
 EOF
@@ -211,9 +225,10 @@ echo "▶ claude exit code: ${code}   ($([ "$code" -eq 0 ] && echo SUCCESS || ec
 # Exit codes: 3 = the result reports is_error (a reported failure must never be
 # recorded as success), 1 = the output is not the expected JSON.
 parse_status=0
-node - "$RESULT_FILE" "$CLAUDE_MODEL" "$wt" "$branch" "$RESULT_WRITER" <<'NODE' || parse_status=$?
+node - "$RESULT_FILE" "$CLAUDE_MODEL" "$wt" "$branch" "$RESULT_WRITER" "$UNEXPECTED_COMMITS" <<'NODE' || parse_status=$?
 const fs = require('node:fs');
-const [file, requested, worktree, branch, writerPath] = process.argv.slice(2);
+const [file, requested, worktree, branch, writerPath, unexpectedRaw] = process.argv.slice(2);
+const unexpectedCommits = /^[1-9][0-9]*$/.test(unexpectedRaw || '') ? Number(unexpectedRaw) : null;
 let data;
 try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { process.exit(1); }
 if (!data || typeof data !== 'object' || typeof data.session_id !== 'string' || !data.session_id) process.exit(1);
@@ -268,6 +283,7 @@ if (process.env.AGENTQ_RESULT) {
       usage: normalized,
       verification: null,
       stop,
+      unexpectedCommits,
     });
   } catch (err) {
     // Never leave a stale or partial file: agentq reads "missing" instead.
@@ -297,9 +313,20 @@ if [ "$parse_status" -ne 0 ]; then
   if [ "$code" -eq 0 ]; then code=1; fi
 fi
 
+if [ "$COMMIT_MODE" = none ]; then
+  echo "▶ uncommitted changes in working tree (no-commit mode):"
+  git -C "$wt" status --short || true
+  git -C "$wt" --no-pager diff --stat || true
+  UNEXPECTED_COMMITS="$(git -C "$wt" rev-list --count "${BASE}..HEAD" 2>/dev/null || echo 0)"
+  case "$UNEXPECTED_COMMITS" in ''|*[!0-9]*) UNEXPECTED_COMMITS=0 ;; esac
+  if [ "$UNEXPECTED_COMMITS" -gt 0 ]; then
+    echo "▶ WARNING: the agent committed ${UNEXPECTED_COMMITS} commit(s) despite no-commit mode; they are recorded in the result file." >&2
+  fi
+else
 echo "▶ commits + diff on ${branch}:"
 git -C "$wt" --no-pager log  --oneline "${BASE}..HEAD" || true
 git -C "$wt" --no-pager diff --stat "${BASE}...HEAD" || true
+fi
 
 cat <<EOF
 

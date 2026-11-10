@@ -112,7 +112,7 @@ lists the matches.
 ```bash
 npm run agentq -- enqueue --repo /path/to/repo --spec FILE [--model MODEL] \
   [--tier small|medium|big] [--base BRANCH] [--depends-on ID[,ID...]] \
-  [--trusted] [--json]
+  [--trusted] [--commit|--no-commit] [--commit-author "Name <email>"] [--json]
 ```
 
 `--spec` and `--issue` are mutually exclusive; exactly one is required. The file
@@ -125,6 +125,38 @@ A spec task has no issue number; `status` names it `spec: <title> (<file>)`.
 `run --id` accepts a spec task with the default worker kind. `run-next` and
 `drain` claim one kind at a time, so a spec queue is drained with
 `--kind spec`.
+
+### Commit policy
+
+Every task carries a commit policy, stored as `execution_policy` on the task
+(`{ commit: "agent" | "none", author: { name, email } | null }`). It is the
+orchestrator's choice of how to run the task, like the tier — not part of the
+pinned input or its digest — and `requeue` keeps it.
+
+- `--commit` (the agent commits as it goes) and `--no-commit` (leave everything
+  uncommitted in the working tree for review) are mutually exclusive. The
+  default is `--no-commit` for `--spec` tasks and `--commit` for `--issue`
+  tasks, so the current issue behaviour is unchanged.
+- `--commit-author "Name <email>"` sets the git identity the agent commits
+  under. The value is parsed strictly and a malformed value is refused.
+- When no author is stored on the task, the runner falls back to the target
+  repo's `agentq.commitAuthor` git config, in `Name <email>` form. Set it once
+  per repo with plain git config — a noreply identity keeps the owner's
+  private email out of pushed branches:
+
+  ```bash
+  git config agentq.commitAuthor "agentq <bot-noreply@example.com>"
+  ```
+
+  With neither, the repo's normal identity applies, as today.
+- In `none` mode the executor tells the agent "Do NOT commit. Leave all
+  changes uncommitted in the working tree for review." and the end-of-run
+  diagnostic shows `git status --short` and `git diff --stat` instead of
+  `BASE..HEAD`. If the agent commits anyway, the executor prints a warning and
+  records `unexpectedCommits` in the result file.
+- MCP `enqueue_task` accepts an optional `commit` (`agent`|`none`) with the
+  same defaults by kind, but no author: a caller must not choose the identity
+  commits are made under.
 
 One end-to-end flow:
 
@@ -500,7 +532,9 @@ rather than shell string interpolation:
 
 `version` (`1`) and `stop` (boolean) are required; every other field may be
 omitted and is read as `null`. `verification` is `passed`, `failed`, or `null`.
-Unknown top-level keys are rejected, and the file is capped at 64 KiB.
+`unexpectedCommits` is a non-negative integer counting commits the agent made
+in no-commit mode, or `null` when there were none. Unknown top-level keys are
+rejected, and the file is capped at 64 KiB.
 
 `usage` is filtered rather than rejected. Only the fields the sinks consume are
 kept (`inputTokens`/`input_tokens`/`input`, the output, cache and total-token

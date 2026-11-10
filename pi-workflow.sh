@@ -183,6 +183,15 @@ const STOP_CONDITION = ${STOP_JS};
 "
 fi
 
+# Commit policy from the queue (AGENTQ_COMMIT_MODE=agent|none; unset means agent).
+# In none mode the generated workflow must not tell the agent to commit, and the
+# reviewer commits under their own identity. GIT_* identity variables arrive in
+# the environment and `env -u AGENTQ_RESULT` below passes them through.
+COMMIT_MODE="${AGENTQ_COMMIT_MODE:-agent}"
+if [ "$COMMIT_MODE" = none ]; then
+  SCRIPT="${SCRIPT//Make focused commits as you go./Do NOT commit. Leave all changes uncommitted in the working tree for review.}"
+fi
+
 # Build the prompt for pi
 read -r -d '' PROMPT <<EOF || true
 Run a workflow to implement GitHub issue #${ISSUE}.
@@ -204,6 +213,12 @@ if [ -n "${AGENTQ_WORKFLOW_ARGS:-}" ]; then
   PROMPT="${PROMPT}
 
 Workflow args (JSON): ${AGENTQ_WORKFLOW_ARGS}"
+fi
+
+if [ "$COMMIT_MODE" = none ]; then
+  PROMPT="${PROMPT}
+
+Commit policy: Do NOT commit. Leave all changes uncommitted in the working tree for review."
 fi
 
 # Keep the transcript out of the working tree: a reviewer who runs
@@ -248,9 +263,22 @@ else
   echo "▶ (no session file — usage not captured)"
 fi
 
+UNEXPECTED_FLAG=""
+if [ "$COMMIT_MODE" = none ]; then
+  echo "▶ uncommitted changes in working tree (no-commit mode):"
+  git -C "$wt" status --short || echo "  (no changes or not a git repo)"
+  git -C "$wt" --no-pager diff --stat || true
+  UNEXPECTED_COMMITS="$(git -C "$wt" rev-list --count "${BASE}..HEAD" 2>/dev/null || echo 0)"
+  case "$UNEXPECTED_COMMITS" in ''|*[!0-9]*) UNEXPECTED_COMMITS=0 ;; esac
+  if [ "$UNEXPECTED_COMMITS" -gt 0 ]; then
+    echo "▶ WARNING: the agent committed ${UNEXPECTED_COMMITS} commit(s) despite no-commit mode; they are recorded in the result file." >&2
+    UNEXPECTED_FLAG="--unexpected-commits ${UNEXPECTED_COMMITS}"
+  fi
+else
 # Diff summary
 echo "▶ diff stat:"
 ( cd "$wt" && git diff --stat "$BASE" ) || echo "  (no changes or not a git repo)"
+fi
 
 # Human-readable summary. agentq reads the AGENTQ_RESULT file below instead of
 # these lines: this output echoes the untrusted issue body.
@@ -262,12 +290,14 @@ echo "session: ${SESSION}"
 # shell interpolation, and the file is replaced atomically. A failure to write
 # it leaves the run's metadata unknown, so it must not change the exit code.
 if [ -n "${AGENTQ_RESULT:-}" ]; then
+  # UNEXPECTED_FLAG is empty or exactly two words; word splitting is intended.
   if ! node "$RESULT_WRITER" \
     --worktree "$wt" \
     --branch "$branch" \
     --session "$SESSION" \
     --usage-file "$SESSION" \
-    --stop-from-file "$OUT_FILE"; then
+    --stop-from-file "$OUT_FILE" \
+    $UNEXPECTED_FLAG; then
     # Never leave a stale or partial file: agentq reads "missing" instead.
     rm -f "$AGENTQ_RESULT"
     echo "▶ could not write the agentq result file" >&2
