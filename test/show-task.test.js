@@ -327,8 +327,11 @@ test('show without --id fails with a one-line error', () => {
   const result = runCli(dbPath, ['show']);
   assert.notEqual(result.exitCode, 0);
   assert.equal(result.stdout, '');
-  assert.equal(result.stderr.trim(), 'show requires --id');
-  assert.equal(result.stderr.trim().split('\n').length, 1);
+  // Node's own warnings (Node 22 flags node:sqlite as experimental) are not
+  // agentq output; the agentq error itself must be exactly one line.
+  const own = result.stderr.trim().split('\n')
+    .filter((line) => !/^\(node:\d+\) \w*Warning:|^\(Use `node --trace-warnings/.test(line));
+  assert.deepEqual(own, ['show requires --id']);
 });
 
 test('show does not create a queue database it was pointed at', () => {
