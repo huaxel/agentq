@@ -280,6 +280,144 @@ function truncateRepo(repoPath) {
   return path.basename(repoPath || '');
 }
 
+/** Body lines `agentq show` prints before it counts the rest. */
+const SHOW_BODY_LINES = 5;
+/** Characters `agentq show` prints for one cell: a body line, a payload, a note. */
+const SHOW_CELL_CHARS = 100;
+/** Label width of the `show` header block (`attempts`, `provider`, `finished`). */
+const SHOW_LABEL_WIDTH = 8;
+/** Label width inside the `show` input block (`source`). */
+const SHOW_INPUT_LABEL_WIDTH = 6;
+
+/**
+ * Cut a string to `max` characters, ellipsis included, so a cell never grows
+ * past the width its caller asked for.
+ *
+ * @param {string} text
+ * @param {number} max
+ * @returns {string}
+ */
+function truncateTo(text, max) {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * Any value as one display cell: whitespace collapses, the cell is cut to
+ * `max` characters with an ellipsis, and nothing renders as an empty string.
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string}
+ */
+function showCell(value, max = SHOW_CELL_CHARS) {
+  if (value === null || value === undefined || value === '') return '—';
+  const text = typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value));
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  if (!oneLine) return '—';
+  return truncateTo(oneLine, max);
+}
+
+/**
+ * The full record of one task (`agentq show`) as text, in four blocks:
+ * header, input, events, reviews.
+ *
+ * The input block is the pinned snapshot, so what prints here is what the task
+ * was queued to do rather than what a spec file says now. Long text is cut to
+ * one printed line. An absent section prints `(none)` instead of nothing, so an
+ * empty list is visibly empty; an absent header field prints `—`, and a task
+ * with no stored commit policy gets no commit line at all.
+ *
+ * @param {{
+ *   task: Record<string, any>,
+ *   input?: Record<string, any>|null,
+ *   events?: Array<Record<string, any>>,
+ *   reviews?: Array<Record<string, any>>,
+ * }} detail
+ * @returns {string}
+ */
+function formatTaskDetail(detail) {
+  const task = detail && detail.task ? detail.task : {};
+  const input = detail ? detail.input : null;
+  const events = detail && Array.isArray(detail.events) ? detail.events : [];
+  const reviews = detail && Array.isArray(detail.reviews) ? detail.reviews : [];
+  const field = (label, value) => `${label.padEnd(SHOW_LABEL_WIDTH)}  ${value}`;
+  const lines = [
+    field('id', showCell(task.id)),
+    field('kind', showCell(task.kind)),
+    field('status', showCell(task.status)),
+    field('model', showCell(task.model)),
+    field('provider', showCell(task.provider)),
+    field('tier', showCell(task.tier)),
+  ];
+  const commit = task.execution_policy && task.execution_policy.commit;
+  if (commit) {
+    const author = task.execution_policy.author;
+    const authorText = author ? ` (${author.name} <${author.email}>)` : '';
+    lines.push(field('commit', `${commit}${authorText}`));
+  }
+  lines.push(
+    field('attempts', `${showCell(task.attempts)}/${showCell(task.max_attempts)}`),
+    field('created', showCell(task.created_at)),
+    field('started', showCell(task.started_at)),
+    field('finished', showCell(task.finished_at)),
+  );
+
+  lines.push('', 'input');
+  if (!input) {
+    lines.push('  (none — this task has no pinned input)');
+  } else {
+    const inputField = (label, value) => `  ${label.padEnd(SHOW_INPUT_LABEL_WIDTH)}  ${value}`;
+    lines.push(
+      inputField('source', showCell(input.source)),
+      inputField('ref', showCell(input.ref)),
+      inputField('title', showCell(input.title)),
+    );
+    // The first ~5 lines are what a caller skims; the count of the rest says how
+    // much of the pinned text is not on screen.
+    const bodyLines = String(input.body ?? '').replace(/\s+$/, '').split(/\r?\n/);
+    if (!bodyLines[0]) {
+      lines.push(inputField('body', '—'));
+    } else {
+      const shown = bodyLines
+        .slice(0, SHOW_BODY_LINES)
+        // A spec can hold one enormous line; a printed line stays one line,
+        // and its own text is not rewritten beyond the cut.
+        .map((line) => truncateTo(line.replace(/\s+$/, ''), SHOW_CELL_CHARS));
+      const hidden = bodyLines.length - shown.length;
+      shown.forEach((line, index) => {
+        const label = index === 0 ? 'body' : '';
+        lines.push(`  ${label.padEnd(SHOW_INPUT_LABEL_WIDTH)}  ${line}`);
+      });
+      if (hidden > 0) {
+        lines.push(`  ${''.padEnd(SHOW_INPUT_LABEL_WIDTH)}  … (+${hidden} more line${hidden === 1 ? '' : 's'})`);
+      }
+    }
+  }
+
+  lines.push('', 'events');
+  if (!events.length) lines.push('  (none)');
+  for (const event of events) {
+    // Time, then the event name padded to a column, then the short payload.
+    lines.push(`  ${showCell(event.created_at)}  ${showCell(event.event, 24).padEnd(24)}  ${showCell(event.payload)}`);
+  }
+
+  lines.push('', 'reviews');
+  if (!reviews.length) lines.push('  (none)');
+  for (const review of reviews) {
+    const cells = [
+      showCell(review.created_at),
+      showCell(review.verdict, 24).padEnd(24),
+      showCell(review.tier, 6).padEnd(6),
+      showCell(review.model),
+    ];
+    if (review.reviewer) cells.push(`by ${showCell(review.reviewer, 30)}`);
+    if (review.note) cells.push(showCell(review.note));
+    lines.push(`  ${cells.join('  ')}`);
+  }
+
+  return lines.map((line) => line.replace(/\s+$/, '')).join('\n');
+}
+
 function formatCost(usageJson) {
   if (!usageJson) return null;
   let usage;
@@ -333,6 +471,7 @@ module.exports = {
   formatModelTable,
   formatOptionsTable,
   formatGapReport,
+  formatTaskDetail,
   formatTrackRecordTable,
   effectiveCostCell,
   paceCell,
@@ -340,5 +479,7 @@ module.exports = {
   truncateRepo,
   formatCost,
   formatJobBlock,
+  showCell,
+  truncateTo,
   summarizeCosts,
 };

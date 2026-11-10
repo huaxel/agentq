@@ -97,6 +97,7 @@ npm run agentq -- drain --verify 'npm test'
 npm run agentq -- run --id 3f2a8c1e --model auto --verify 'npm test'
 
 npm run agentq -- status
+npm run agentq -- show --id 3f2a8c1e
 npm run agentq -- requeue --id 3f2a8c1e --model auto
 npm run agentq -- prune
 ```
@@ -929,6 +930,14 @@ table, and the `track_records` MCP tool returns the same rows as JSON.
 Reviews live in the queue database (`reviews` table), so they travel with the
 queue. A missing database or a database from before the table existed means no
 records, never an error — routing then behaves exactly as it did before.
+
+A recorded review can be corrected with `agentq review amend --id N
+[--verdict V] [--tier T] [--note TEXT]`: at least one of the three is required,
+the verdict and tier are validated exactly as `review add`, and the model,
+task and reviewer are frozen. The amendment is stamped on the row
+(`amended_at`), and `review list` prints each review's numeric `id` so you know
+what to point `amend` at. Track records are recomputed from the current rows,
+so an amend flows straight through to `review stats` and `pick`.
 
 ### Path health
 

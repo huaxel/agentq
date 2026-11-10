@@ -72,7 +72,7 @@ test('fresh databases have the reviews table and its (model, tier) index', () =>
   const { db } = openFreshDb(root);
   try {
     assert.deepEqual(columns(db, 'reviews'), [
-      'id', 'task_id', 'model', 'tier', 'verdict', 'note', 'reviewer', 'source', 'created_at',
+      'id', 'task_id', 'model', 'tier', 'verdict', 'note', 'reviewer', 'source', 'created_at', 'amended_at',
     ]);
     const indexes = db.prepare('PRAGMA index_list(reviews)').all().map((row) => row.name);
     assert.ok(indexes.includes('idx_reviews_model_tier'), `missing index, saw: ${indexes.join(', ')}`);
@@ -90,11 +90,11 @@ test('the reviews table is added to a database created before it existed', () =>
     assert.ok(!columns(db, 'reviews').length);
     dbModule.initSchema(db);
     assert.deepEqual(columns(db, 'reviews'), [
-      'id', 'task_id', 'model', 'tier', 'verdict', 'note', 'reviewer', 'source', 'created_at',
+      'id', 'task_id', 'model', 'tier', 'verdict', 'note', 'reviewer', 'source', 'created_at', 'amended_at',
     ]);
     // Idempotent: running it again changes nothing.
     dbModule.initSchema(db);
-    assert.equal(columns(db, 'reviews').length, 9);
+    assert.equal(columns(db, 'reviews').length, 10);
   } finally {
     db.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -147,6 +147,39 @@ test('listReviews filters by model and since, newest first', () => {
     assert.deepEqual(dbModule.listReviews(db, { model: CHEAP_MODEL }).map((row) => row.tier), ['big', 'small']);
     assert.equal(dbModule.listReviews(db, { since: '2999-01-01T00:00:00Z' }).length, 0);
     assert.equal(dbModule.listReviews(db, { since: '2000-01-01T00:00:00Z' }).length, 3);
+  } finally {
+    db.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('amendReview validates enums, freezes model/task/reviewer, and stamps amended_at', () => {
+  const root = tmpdir();
+  const { db } = openFreshDb(root);
+  try {
+    const review = dbModule.addReview(db, {
+      model: CHEAP_MODEL, tier: 'medium', verdict: 'accepted', taskId: 'task-1', note: 'ok', reviewer: 'owner',
+    });
+    assert.equal(review.amended_at, null, 'a fresh review is not amended');
+
+    assert.throws(() => dbModule.amendReview(db, review.id, { verdict: 'great' }), /unknown verdict/);
+    assert.throws(() => dbModule.amendReview(db, review.id, { tier: 'gigantic' }), /unknown tier/);
+    assert.throws(() => dbModule.amendReview(db, review.id, {}), /nothing to change/);
+    assert.throws(() => dbModule.amendReview(db, 99999, { verdict: 'rejected' }), /unknown review id/);
+
+    const amended = dbModule.amendReview(db, review.id, { verdict: 'rejected', tier: 'big', note: 'ci failed' });
+    assert.equal(amended.verdict, 'rejected');
+    assert.equal(amended.tier, 'big');
+    assert.equal(amended.note, 'ci failed');
+    assert.equal(amended.model, CHEAP_MODEL, 'model is frozen');
+    assert.equal(amended.task_id, 'task-1', 'task is frozen');
+    assert.equal(amended.reviewer, 'owner', 'reviewer is frozen');
+    assert.match(amended.amended_at, /^\d{4}-\d{2}-\d{2}T/, 'the amendment is traced');
+
+    // A null note clears it; amended_at is stamped again.
+    const cleared = dbModule.amendReview(db, review.id, { note: null });
+    assert.equal(cleared.note, null);
+    assert.ok(cleared.amended_at, 'traced after a note-only change');
   } finally {
     db.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -268,6 +301,108 @@ test('agentq review add refuses an unknown model, tier or verdict', () => {
     const missing = runCli(dbPath, ['review', 'add', '--model', CHEAP_MODEL], fixture.env());
     assert.equal(missing.exitCode, 1);
     assert.match(missing.stderr, /requires --tier/);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('agentq review list prints each review id as the first column', () => {
+  const fixture = writeRoutingFixture();
+  const dbPath = path.join(fixture.root, 'data', 'orchestrator.sqlite');
+  try {
+    runCli(dbPath, ['review', 'add', '--model', CHEAP_MODEL, '--tier', 'medium', '--verdict', 'accepted', '--json'], fixture.env());
+    runCli(dbPath, ['review', 'add', '--model', CHEAP_MODEL, '--tier', 'big', '--verdict', 'rejected', '--json'], fixture.env());
+
+    const text = runCli(dbPath, ['review', 'list'], fixture.env());
+    assert.equal(text.exitCode, 0, text.stderr);
+    const firstLine = text.stdout.split('\n')[0];
+    assert.match(firstLine, /^\s*2\s/, 'the newest review (id 2) is the first column');
+
+    const jsonList = runCli(dbPath, ['review', 'list', '--json'], fixture.env());
+    const rows = JSON.parse(jsonList.stdout);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((row) => row.id), [2, 1]);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('agentq review amend corrects a verdict and review stats reflects it', () => {
+  const fixture = writeRoutingFixture();
+  const dbPath = path.join(fixture.root, 'data', 'orchestrator.sqlite');
+  try {
+    const added = runCli(dbPath, ['review', 'add', '--model', CHEAP_MODEL, '--tier', 'medium', '--verdict', 'accepted', '--json'], fixture.env());
+    const id = JSON.parse(added.stdout).review.id;
+
+    const amended = runCli(dbPath, ['review', 'amend', '--id', String(id), '--verdict', 'rejected', '--json'], fixture.env());
+    assert.equal(amended.exitCode, 0, amended.stderr);
+    assert.equal(JSON.parse(amended.stdout).review.verdict, 'rejected');
+
+    const jsonList = runCli(dbPath, ['review', 'list', '--json'], fixture.env());
+    assert.equal(JSON.parse(jsonList.stdout)[0].verdict, 'rejected');
+
+    const stats = runCli(dbPath, ['review', 'stats', '--json'], fixture.env());
+    const medium = JSON.parse(stats.stdout).records.find((row) => row.tier === 'medium');
+    assert.equal(medium.n, 1);
+    assert.equal(medium.accepted, 0);
+    assert.equal(medium.rejected, 1);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('agentq review amend refuses no fields, a bad enum, or an unknown id', () => {
+  const fixture = writeRoutingFixture();
+  const dbPath = path.join(fixture.root, 'data', 'orchestrator.sqlite');
+  try {
+    const added = runCli(dbPath, ['review', 'add', '--model', CHEAP_MODEL, '--tier', 'medium', '--verdict', 'accepted', '--json'], fixture.env());
+    const id = JSON.parse(added.stdout).review.id;
+
+    const none = runCli(dbPath, ['review', 'amend', '--id', String(id)], fixture.env());
+    assert.equal(none.exitCode, 1);
+    assert.match(none.stderr, /requires at least one of --verdict, --tier or --note/);
+
+    const badVerdict = runCli(dbPath, ['review', 'amend', '--id', String(id), '--verdict', 'fine'], fixture.env());
+    assert.equal(badVerdict.exitCode, 1);
+    assert.match(badVerdict.stderr, /unknown verdict/);
+
+    const badTier = runCli(dbPath, ['review', 'amend', '--id', String(id), '--tier', 'huge'], fixture.env());
+    assert.equal(badTier.exitCode, 1);
+    assert.match(badTier.stderr, /Unknown tier/);
+
+    const unknown = runCli(dbPath, ['review', 'amend', '--id', '99999', '--verdict', 'rejected'], fixture.env());
+    assert.equal(unknown.exitCode, 1);
+    assert.match(unknown.stderr, /unknown review id/);
+
+    const missingId = runCli(dbPath, ['review', 'amend', '--verdict', 'rejected'], fixture.env());
+    assert.equal(missingId.exitCode, 1);
+    assert.match(missingId.stderr, /review amend requires --id/);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('agentq review amend writes the trace (amended_at) and frozen-over fields', () => {
+  const fixture = writeRoutingFixture();
+  const dbPath = path.join(fixture.root, 'data', 'orchestrator.sqlite');
+  try {
+    const added = runCli(dbPath, ['review', 'add', '--model', CHEAP_MODEL, '--tier', 'medium', '--verdict', 'accepted', '--task', 'task-1', '--reviewer', 'owner', '--json'], fixture.env());
+    const id = JSON.parse(added.stdout).review.id;
+
+    const before = dbModule.openDb(dbPath);
+    assert.equal(dbModule.listReviews(before, { model: CHEAP_MODEL })[0].amended_at, null);
+    before.close();
+
+    runCli(dbPath, ['review', 'amend', '--id', String(id), '--note', 'ci failed after all'], fixture.env());
+
+    const after = dbModule.openDb(dbPath);
+    const row = dbModule.listReviews(after, { model: CHEAP_MODEL })[0];
+    assert.match(row.amended_at, /^\d{4}-\d{2}-\d{2}T/, 'amended_at is stamped');
+    assert.equal(row.note, 'ci failed after all');
+    assert.equal(row.model, CHEAP_MODEL, 'model cannot be changed');
+    assert.equal(row.task_id, 'task-1', 'task cannot be changed');
+    assert.equal(row.reviewer, 'owner', 'reviewer cannot be changed');
+    after.close();
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }

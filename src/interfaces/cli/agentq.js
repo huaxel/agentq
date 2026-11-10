@@ -21,6 +21,7 @@ const { REVIEW_TIERS, REVIEW_VERDICTS, trackRecordStats } = require('../../core/
 const { refreshQuotaIfStale } = require('../../lib/quota-refresh.js');
 const { DEFAULT_TIER, normalizeTier, summarizeRejections } = require('../../core/auto-model.js');
 const { isSqliteBusy } = require('../../queue/db-helpers.js');
+const { showTask } = require('../../queue/task-detail.js');
 const {
   localWorkerIdError,
   openQueueDb,
@@ -34,6 +35,7 @@ const {
   formatModelTable,
   formatOptionsTable,
   formatGapReport,
+  formatTaskDetail,
   formatTrackRecordTable,
   truncateRepo,
   formatCost,
@@ -62,10 +64,12 @@ function usage() {
   node bin/agentq.js [global opts] prune [--force] [--json]
   node bin/agentq.js [global opts] pick [--tier small|medium|big] [--quota PATH] [--threshold N] [--private] [--json]
   node bin/agentq.js [global opts] review add --model ID --tier T --verdict V [--task ID] [--note TEXT] [--reviewer NAME] [--json]
+  node bin/agentq.js [global opts] review amend --id N [--verdict V] [--tier T] [--note TEXT] [--json]
   node bin/agentq.js [global opts] review list [--model ID] [--json]
   node bin/agentq.js [global opts] review stats [--json]
   node bin/agentq.js [global opts] paths gaps [--json]
   node bin/agentq.js [global opts] status [--json]
+  node bin/agentq.js [global opts] show --id ID [--json]
   node bin/agentq.js [global opts] save-workflow --name NAME --file PATH [--json]
   node bin/agentq.js [global opts] list-workflows [--json]
   node bin/agentq.js [global opts] cancel --id ID [--json]
@@ -124,6 +128,9 @@ function usage() {
                              --model must be a known runnable; --task is optional
                              (work outside the queue has no task id).
     agentq review list       Reviews, newest first (--model to filter).
+    agentq review amend      Correct a review (by --id): --verdict, --tier and/or
+                             --note, at least one. Model, task and reviewer are
+                             frozen; the change is stamped in the review.
     agentq review stats      The per-(model, tier) track records routing uses.
                              A record with enough reviews can make an unscored
                              model eligible; it never reorders scored models.
@@ -642,6 +649,32 @@ function commandPaths(options) {
 }
 
 /**
+ * `agentq show --id ID`: one task in full — header, pinned input, the
+ * `task_events` audit trail, and the reviews linked to it.
+ *
+ * Read-only, and it deliberately does not go through a queue source: opening a
+ * source would create the file and run schema migrations, which are writes. The
+ * id is a full id or a unique prefix, resolved by the store's own resolver, so
+ * an unknown or ambiguous prefix reports exactly the error `run --id` reports.
+ */
+function commandShow(global, options) {
+  if (!options.id) throw new Error('show requires --id');
+  if (global.source === 'orchestrator') {
+    throw new Error(
+      "'show' reads the local queue file and is not implemented for --source orchestrator. " +
+      "Use the orchestrator's HTTP API (GET /api/tasks/:id) or run it against the shared database without --source orchestrator.",
+    );
+  }
+  const detail = showTask(global.db, options.id);
+  if (options.json) {
+    print(detail, true);
+    return 0;
+  }
+  process.stdout.write(`${formatTaskDetail(detail)}\n`);
+  return 0;
+}
+
+/**
  * `agentq review <action>`: record an outcome review, or read the reviews and
  * the track records they fold into.
  *
@@ -651,6 +684,7 @@ function commandPaths(options) {
  */
 function commandReview(global, options) {
   if (options.action === 'add') return commandReviewAdd(global, options);
+  if (options.action === 'amend') return commandReviewAmend(global, options);
   if (options.action === 'list') return commandReviewList(global, options);
   if (options.action === 'stats') return commandReviewStats(global, options);
   throw new Error(`unknown review command: ${options.action ?? '(none)'} (expected add, list or stats)`);
@@ -695,9 +729,45 @@ function commandReviewAdd(global, options) {
   }
 }
 
+/**
+ * `agentq review amend --id N [--verdict V] [--tier T] [--note TEXT] [--json]`.
+ *
+ * Correct a recorded review. At least one of --verdict, --tier or --note is
+ * required; the enums are validated exactly as `review add` validates them
+ * (via the same `amendReview` helper). Model, task and reviewer are frozen.
+ */
+function commandReviewAmend(global, options) {
+  if (options.id == null || options.id === '') throw new Error('review amend requires --id');
+  if (options.verdict == null && options.tier == null && options.note == null) {
+    throw new Error('review amend requires at least one of --verdict, --tier or --note');
+  }
+  const changes = {};
+  if (options.verdict != null) changes.verdict = options.verdict;
+  if (options.tier != null) changes.tier = options.tier;
+  if (options.note != null) changes.note = options.note;
+  const { amendReview } = require('../../queue/db.js');
+  const db = openQueueDb(global.db);
+  try {
+    const review = amendReview(db, options.id, changes);
+    if (options.json) {
+      print({ status: 'amended', review }, true);
+    } else {
+      process.stdout.write(`amended review ${review.id}: ${review.model} ${review.tier} ${review.verdict}\n`);
+    }
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
 function commandReviewList(global, options) {
   const reviews = loadReviewsFile(global.db, { model: options.model ?? null });
   if (options.json) {
+    // `--json` prints the full rows, which already include `id`; assert it so
+    // a future refactor can't silently drop the column `amend` points at.
+    if (reviews.length && !('id' in reviews[0])) {
+      throw new Error('review list: --json output is missing the review id');
+    }
     print(reviews, true);
     return 0;
   }
@@ -710,7 +780,7 @@ function commandReviewList(global, options) {
     const note = review.note ? `  ${review.note}` : '';
     const reviewer = review.reviewer ? ` by ${review.reviewer}` : '';
     process.stdout.write(
-      `${review.created_at}  ${String(review.model).padEnd(40)} ${review.tier.padEnd(6)} `
+      `${String(review.id).padStart(4)}  ${review.created_at}  ${String(review.model).padEnd(40)} ${review.tier.padEnd(6)} `
       + `${review.verdict.padEnd(18)} ${review.source}${task}${reviewer}${note}\n`,
     );
   }
@@ -880,11 +950,13 @@ async function main(argv = process.argv.slice(2)) {
   options.noQuotaRefresh = global.quotaRefresh === false;
   if (global.source === 'local') options.kind = global.kind;
 
-  // Commands that do not use the local queue: they must not create or require
+  // Commands that do not open a queue source: they must not create or require
   // its database (pick/list-workflows/save-workflow are pure, jules-* open the
-  // orchestrator database themselves, import-log opens the target itself).
+  // orchestrator database themselves, import-log opens the target itself, and
+  // `show` reads an existing queue through a read-only handle instead).
   if (command === 'home') return commandHome(options);
   if (command === 'paths') return commandPaths(options);
+  if (command === 'show') return commandShow(global, options);
   if (command === 'review') return commandReview(global, options);
   if (command === 'import-log') return commandImportLog(global, options);
   if (command === 'pick') return commandPick(global, options);

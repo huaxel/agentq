@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS reviews (
   note        TEXT,
   reviewer    TEXT,
   source      TEXT NOT NULL DEFAULT 'review',
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  amended_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_model_tier ON reviews(model, tier);
@@ -218,6 +219,10 @@ function initSchema(db) {
   }
   if (!taskCols.includes('execution_policy')) {
     db.exec('ALTER TABLE tasks ADD COLUMN execution_policy TEXT');
+  }
+  const reviewCols = db.prepare('PRAGMA table_info(reviews)').all().map((c) => c.name);
+  if (!reviewCols.includes('amended_at')) {
+    db.exec('ALTER TABLE reviews ADD COLUMN amended_at TEXT');
   }
 }
 
@@ -1795,18 +1800,75 @@ function addReview(db, { model, tier, verdict, taskId = null, note = null, revie
 }
 
 /**
- * Review rows, newest first, optionally for one model and/or since a time.
+ * Correct a recorded review.
+ *
+ * Only `verdict`, `tier` and `note` can change: the model, task and reviewer
+ * are the record of what the work was and who judged it, so they are frozen.
+ * Enum validation mirrors `addReview` (the same arrays, the same messages): a
+ * row with an unknown verdict or tier would silently disappear from every
+ * track record.
+ *
+ * The amendment is traced by stamping `amended_at`: the queue's `task_events`
+ * log requires a non-null `task_id` with a foreign key to `tasks`, so it
+ * cannot trace the task-less reviews `review add` allows (and would fail for a
+ * review whose stored `task_id` is not a real task row). A nullable column is
+ * simpler and traces every review uniformly.
  *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{ model?: string|null, since?: string|number|Date|null }} [opts]
+ * @param {number|string} id
+ * @param {{ verdict?: string, tier?: string, note?: string|null }} changes
+ *   At least one of the three must be present; `note` may be an empty string or
+ *   null to clear it.
+ * @returns {{ id: number, task_id: string|null, model: string, tier: string, verdict: string, note: string|null, reviewer: string|null, source: string, created_at: string, amended_at: string|null }}
+ */
+function amendReview(db, id, { verdict, tier, note }) {
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+  if (!review) throw new Error(`amendReview: unknown review id ${id}`);
+  const sets = [];
+  const params = [];
+  if (verdict != null) {
+    if (!REVIEW_VERDICTS.includes(verdict)) {
+      throw new Error(`amendReview: unknown verdict ${String(verdict)} (expected ${REVIEW_VERDICTS.join('|')})`);
+    }
+    sets.push('verdict = ?');
+    params.push(verdict);
+  }
+  if (tier != null) {
+    if (!REVIEW_TIERS.includes(tier)) {
+      throw new Error(`amendReview: unknown tier ${String(tier)} (expected ${REVIEW_TIERS.join('|')})`);
+    }
+    sets.push('tier = ?');
+    params.push(tier);
+  }
+  if (note !== undefined) {
+    sets.push('note = ?');
+    params.push(note == null || note === '' ? null : String(note));
+  }
+  if (!sets.length) throw new Error('amendReview: nothing to change');
+  sets.push('amended_at = ?');
+  params.push(nowIso());
+  db.prepare(`UPDATE reviews SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+  return db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+}
+
+/**
+ * Review rows, newest first, optionally for one model, one task, and/or since
+ * a time.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{ model?: string|null, taskId?: string|null, since?: string|number|Date|null }} [opts]
  * @returns {Array<{ id: number, task_id: string|null, model: string, tier: string, verdict: string, note: string|null, reviewer: string|null, source: string, created_at: string }>}
  */
-function listReviews(db, { model = null, since = null } = {}) {
+function listReviews(db, { model = null, taskId = null, since = null } = {}) {
   const clauses = [];
   const params = [];
   if (typeof model === 'string' && model) {
     clauses.push('model = ?');
     params.push(model);
+  }
+  if (typeof taskId === 'string' && taskId) {
+    clauses.push('task_id = ?');
+    params.push(taskId);
   }
   if (since != null && since !== '') {
     const iso = since instanceof Date ? since.toISOString() : String(since);
@@ -1910,6 +1972,7 @@ module.exports = {
   getPathOutcomes,
   getVerifyFailures,
   addReview,
+  amendReview,
   listReviews,
   REVIEW_TIERS,
   REVIEW_VERDICTS,
