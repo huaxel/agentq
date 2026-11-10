@@ -1,6 +1,5 @@
 'use strict';
 
-const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const { execFileSync, execFile } = require('node:child_process');
 
@@ -32,8 +31,21 @@ function payload(input, number) {
   };
 }
 
+/**
+ * The pinned-input digest: SHA-256 over a domain separator and the canonical
+ * JSON payload. The generic task input (src/core/task-input.js) reuses this
+ * helper with its own domain, so there is exactly one digest implementation.
+ *
+ * @param {unknown} value canonical payload, without the digest itself
+ * @param {string} [domain] separator that keeps input types from colliding
+ * @returns {string} lowercase hex digest
+ */
+function digestPayload(value, domain = 'agentq-issue-input-v1') {
+  return createHash('sha256').update(domain).update('\0').update(JSON.stringify(value)).digest('hex');
+}
+
 function digest(value) {
-  return createHash('sha256').update('agentq-issue-input-v1\0').update(JSON.stringify(value)).digest('hex');
+  return digestPayload(value);
 }
 
 function validateIssueInput(input, number) {
@@ -88,22 +100,7 @@ function issueInputFromPrompt(prompt, number) {
   try { return validateIssueInput(JSON.parse(prompt), number); } catch { return null; }
 }
 
-function validateIssueJob(job) {
-  if (job.kind === 'feedback') return null;
-  if (job.kind && job.kind !== 'github_issue' && job.issue_number == null) return null;
-  if (!Number.isSafeInteger(job.issue_number) || job.issue_number <= 0) throw invalid();
-  return validateIssueInput(job.issue_input, job.issue_number);
-}
-
-function readPinnedIssue(number) {
-  try {
-    const input = validateIssueInput(JSON.parse(fs.readFileSync(0, 'utf8')), number);
-    if (input.sha256 !== process.env.AGENTQ_INPUT_SHA256) throw invalid();
-    return input;
-  } catch { throw invalid(); }
-}
-
 module.exports = {
   TYPE, MAX_INPUT_BYTES, createIssueInput, fetchIssueInput, fetchIssueInputAsync, validateIssueInput,
-  issueInputFromPrompt, validateIssueJob, readPinnedIssue,
+  issueInputFromPrompt, digestPayload,
 };

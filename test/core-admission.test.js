@@ -4,9 +4,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { admit, ADMISSION_CHECKS } = require('../src/core/admission.js');
 const { createIssueInput } = require('../src/core/issue-input.js');
+const { taskInputFromIssue } = require('../src/core/task-input.js');
 
 const ISSUE_NUMBER = 42;
-const INVALID_INPUT = 'Missing or invalid pinned issue input; enqueue a new job to capture the intended issue text.';
+const INVALID_INPUT = 'Missing or invalid pinned task input; enqueue a new job to capture the intended task text.';
 
 function rawIssue(number = ISSUE_NUMBER) {
   return {
@@ -19,7 +20,7 @@ function rawIssue(number = ISSUE_NUMBER) {
 }
 
 function pinnedInput(number = ISSUE_NUMBER) {
-  return createIssueInput(rawIssue(number));
+  return taskInputFromIssue(createIssueInput(rawIssue(number)));
 }
 
 function issueJob(overrides = {}) {
@@ -27,7 +28,7 @@ function issueJob(overrides = {}) {
     id: 1,
     kind: 'github_issue',
     issue_number: ISSUE_NUMBER,
-    issue_input: pinnedInput(),
+    task_input: pinnedInput(),
     model: 'test/model',
     trusted: true,
     ...overrides,
@@ -99,7 +100,7 @@ const refusals = [
     job: () => issueJob({ trusted: false }),
     caps: {},
     reason: 'Refusing untrusted job #1 without --sandbox or --allow-untrusted. '
-      + 'Issue text can contain arbitrary instructions; pi executes bash with your full user rights.',
+      + 'Task text can contain arbitrary instructions; pi executes bash with your full user rights.',
   },
   {
     check: 'trust',
@@ -107,7 +108,7 @@ const refusals = [
     job: () => issueJob({ trusted: 0 }),
     caps: { sandbox: false, cua: false, allowUntrusted: false },
     reason: 'Refusing untrusted job #1 without --sandbox or --allow-untrusted. '
-      + 'Issue text can contain arbitrary instructions; pi executes bash with your full user rights.',
+      + 'Task text can contain arbitrary instructions; pi executes bash with your full user rights.',
   },
   {
     check: 'trust',
@@ -120,7 +121,7 @@ const refusals = [
   {
     check: 'issue-input',
     name: 'issue job without a pinned input',
-    job: () => issueJob({ issue_input: undefined }),
+    job: () => issueJob({ task_input: undefined }),
     caps: {},
     reason: INVALID_INPUT,
     carriesError: true,
@@ -130,7 +131,7 @@ const refusals = [
     name: 'issue job with a tampered pinned input',
     job: () => {
       const job = issueJob();
-      job.issue_input.issue.body = 'changed without its digest';
+      job.task_input.body = 'changed without its digest';
       return job;
     },
     caps: {},
@@ -140,7 +141,7 @@ const refusals = [
   {
     check: 'issue-input',
     name: 'issue job whose input belongs to another issue',
-    job: () => issueJob({ issue_input: pinnedInput(43) }),
+    job: () => issueJob({ task_input: pinnedInput(43) }),
     caps: {},
     reason: INVALID_INPUT,
     carriesError: true,
@@ -178,7 +179,7 @@ for (const { check, name, job, caps, reason, carriesError = false } of refusals)
 }
 
 test('admit preserves the original validation error object on the issue-input check', () => {
-  const refusal = admit(issueJob({ issue_input: undefined }), {});
+  const refusal = admit(issueJob({ task_input: undefined }), {});
   assert.equal(refusal.ok, false);
   assert.ok(refusal.error instanceof Error);
   assert.equal(refusal.error.message, refusal.reason);
@@ -192,9 +193,9 @@ test('admit checks run in the documented order', () => {
   // cua is refused before the trust gate can accept the job.
   assert.equal(admit(issueJob(), { cua: true, allowUntrusted: true }).reason, '--cua can run feedback jobs only.');
   // The trust gate is decided before the pinned input is validated.
-  assert.equal(admit(issueJob({ trusted: false, issue_input: undefined }), {}).reason,
+  assert.equal(admit(issueJob({ trusted: false, task_input: undefined }), {}).reason,
     'Refusing untrusted job #1 without --sandbox or --allow-untrusted. '
-    + 'Issue text can contain arbitrary instructions; pi executes bash with your full user rights.');
+    + 'Task text can contain arbitrary instructions; pi executes bash with your full user rights.');
 });
 
 const happyPaths = [
@@ -248,8 +249,8 @@ test('admit returns the canonical pinned input for a valid issue job', () => {
   const job = issueJob();
   const admission = admit(job, {});
   assert.equal(admission.ok, true);
-  assert.deepEqual(admission.job.issue_input, job.issue_input);
-  assert.equal(admission.job.issue_input.sha256, job.issue_input.sha256);
+  assert.deepEqual(admission.job.task_input, job.task_input);
+  assert.equal(admission.job.task_input.sha256, job.task_input.sha256);
   assert.equal(admission.job.issue_number, ISSUE_NUMBER);
 });
 
@@ -272,7 +273,7 @@ test('admit never mutates the job it is given', () => {
     { job: deepFreeze(issueJob()), caps: {} },
     { job: deepFreeze(issueJob({ trusted: false })), caps: {} },
     { job: deepFreeze(feedbackJob()), caps: { sandbox: 'worktree' } },
-    { job: deepFreeze(issueJob({ issue_input: undefined })), caps: {} },
+    { job: deepFreeze(issueJob({ task_input: undefined })), caps: {} },
   ];
   for (const { job, caps } of cases) {
     const before = structuredClone(job);

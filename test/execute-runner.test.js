@@ -136,7 +136,7 @@ test('runOnce re-throws the original error even when sink.recover() itself throw
     finish: async () => { throw new Error('finish should not be reached'); },
     recover: async () => { throw new Error('recover exploded (e.g. a rejected stale claim)'); },
   };
-  const job = { id: 1, repo_path: root, issue_number: 1, model: 'test-model', base_branch: 'main' };
+  const job = { id: 1, kind: 'prompt', prompt: 'do work', repo_path: root, model: 'test-model', base_branch: 'main' };
 
   await assert.rejects(
     () => runOnce(job, { executor }, { sink: fakeSink }),

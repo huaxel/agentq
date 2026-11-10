@@ -81,6 +81,14 @@ npm run agentq -- enqueue \
   --model auto \
   --trusted
 
+# Or enqueue a local Markdown spec (exactly one of --issue / --spec)
+npm run agentq -- enqueue \
+  --repo /path/to/repo \
+  --spec ./specs/dry-run.md \
+  --model auto \
+  --tier big \
+  --trusted
+
 # Run one job or drain every ready job
 npm run agentq -- run-next --verify 'npm test'
 npm run agentq -- drain --verify 'npm test'
@@ -98,6 +106,44 @@ Run `npm run agentq -- --help` for the complete command surface.
 Task ids are UUIDs. Every `--id` (and `--depends-on`) accepts a full id or a
 unique prefix of at least six characters; an ambiguous prefix is an error that
 lists the matches.
+
+### Enqueueing a local spec
+
+```bash
+npm run agentq -- enqueue --repo /path/to/repo --spec FILE [--model MODEL] \
+  [--tier small|medium|big] [--base BRANCH] [--depends-on ID[,ID...]] \
+  [--trusted] [--json]
+```
+
+`--spec` and `--issue` are mutually exclusive; exactly one is required. The file
+is read at enqueue time, so the task runs the text you queued even if the file
+changes later. `--tier` is stored in `routing_policy` as `{ tier }`, which
+dispatch, the `model-chosen` event and `review_task` all read back. `--trusted`
+keeps its meaning: the CLI is the owner. MCP is never trusted.
+
+A spec task has no issue number; `status` names it `spec: <title> (<file>)`.
+`run --id` accepts a spec task with the default worker kind. `run-next` and
+`drain` claim one kind at a time, so a spec queue is drained with
+`--kind spec`.
+
+One end-to-end flow:
+
+```bash
+cat > /tmp/dry-run.md <<'EOF'
+# Add a --dry-run flag to the exporter
+
+Print what would be written without touching the output file.
+EOF
+
+npm run agentq -- enqueue --repo /path/to/repo --spec /tmp/dry-run.md \
+  --model auto --tier medium --trusted
+# → enqueued #3f2a8c1e
+
+npm run agentq -- run --id 3f2a8c1e --verify 'npm test'
+
+npm run agentq -- review add --task 3f2a8c1e \
+  --model opencode-go/deepseek-v4-flash --tier medium --verdict accepted
+```
 
 ### Running one specific task
 
@@ -147,17 +193,49 @@ recognises a crashed dispatch worker.
 `run --id` is local-queue only: `--source orchestrator` has no claim-by-id
 endpoint, so it is refused rather than silently running a different task.
 
-### Pinned issue inputs
+### Task sources and pinned inputs
 
-Issue enqueue requires GitHub access. One bounded `gh issue view` request captures
-number, title, body, URL, and update time before the job is stored. The queue keeps
-the exact text, capture time, and SHA-256 snapshot digest. A failed fetch creates
-no job. Execution and retries use that stored input, not the issue's latest text.
+A task's input is pinned at enqueue time, whatever its source. One capture
+produces a generic snapshot, and the queue keeps it in `prompt`:
+
+```json
+{
+  "type": "agentq.task-input/v1",
+  "source": "github | file | inline",
+  "ref": "42 | /abs/path/spec.md | null",
+  "title": "...",
+  "body": "...",
+  "url": "https://github.com/owner/repo/issues/42 | null",
+  "capturedAt": "2026-11-10T00:00:00.000Z",
+  "sha256": "..."
+}
+```
+
+`sha256` covers the canonical JSON of every other field (the same digest helper
+the older issue snapshot used). Execution and retries use the stored snapshot,
+never the live source.
+
+| source | `ref` | captured by |
+| --- | --- | --- |
+| `github` | issue number, as a string | one bounded `gh issue view` request (number, title, body, URL, update time) |
+| `file` | absolute file path | `enqueue --spec FILE`, read as UTF-8 now |
+| `inline` | `null` | MCP `enqueue_task` kind `spec`, with `title` and `body` |
+
+The file adapter takes the title from the first `# ` heading, else the file
+name, and the whole file as the body. A missing, empty or oversized spec (over
+512 KiB) is refused with a one-line error and nothing is enqueued. Editing the
+file afterwards changes nothing; changed requirements need a new task.
+
+Rows written by older agentq (`agentq.github-issue-input`) are converted at
+read time in one place and keep validating and running. The conversion is not a
+compatibility layer spread across call sites: `src/core/task-input.js` owns it.
+
+A failed capture creates no job.
 
 `requeue` retains the original input. For changed requirements, enqueue a new job;
 there is no implicit refresh. Local jobs without a valid snapshot remain visible
 as blocked with an input error. Selection skips them so independent valid jobs
-can continue. Orchestrator workers terminally fail invalid claimed issue jobs
+can continue. Orchestrator workers terminally fail invalid claimed tasks
 without retries; approval-gated legacy jobs cannot be approved. Review them and
 enqueue replacement jobs explicitly, including replacement dependencies where
 needed. No old inputs or dependency links are automatically rewritten or deleted.
@@ -166,23 +244,26 @@ The CLI captures on the enqueueing machine. Dashboard/API issue creation without
 an input snapshot captures on the server, which therefore needs `gh` access and
 an accessible repository directory locally. Server captures are asynchronous and
 limited to four concurrent requests; a busy server returns 503 without creating
-a task. A client may instead send a snapshot from
-`src/core/issue-input.js` as `JSON.stringify(snapshot)` in `prompt`; the server
-validates it without refetching. Issue input cannot be patched in place, even
-before approval. Approval and completion records identify the snapshot digest.
+a task. A client may instead send a snapshot from `src/core/task-input.js` as
+`JSON.stringify(snapshot)` in `prompt`; the server validates it without
+refetching. Pinned input cannot be patched in place, even before approval.
+Approval and completion records identify the snapshot digest.
 For dashboard issue jobs, leave Prompt blank and keep requirements in the issue;
 Prompt remains available for non-issue tasks.
 
-Issue executors receive a third `--agentq-pinned-input` argument and the canonical
-snapshot on stdin, with `AGENTQ_PINNED_INPUT=1` and `AGENTQ_INPUT_SHA256`. Sandbox
-wrappers must forward arguments, stdin, these non-secret input variables,
-`AGENTQ_WORKTREE`, `AGENTQ_RESULT`, and `BASE_BRANCH` unchanged. The queued-mode argument prevents
-a stripped environment from falling back to a live fetch. Unavailable or corrupt
-transport fails without a host fallback. Custom issue executors must consume
-this contract too. Direct,
-supervised standalone scripts still fetch current issue text once per invocation.
+Executors receive a third `--agentq-pinned-input` argument and the canonical
+generic snapshot on stdin, with `AGENTQ_PINNED_INPUT=1` and
+`AGENTQ_INPUT_SHA256`. The first argument is the issue number for a GitHub task
+and the task id for a spec task (the executor derives its worktree slug from the
+pinned title). Sandbox wrappers must forward arguments, stdin, these non-secret
+input variables, `AGENTQ_WORKTREE`, `AGENTQ_RESULT`, and `BASE_BRANCH`
+unchanged. The queued-mode argument prevents a stripped environment from falling
+back to a live fetch. Unavailable or corrupt transport fails without a host
+fallback. Custom executors must consume this contract too. Direct, supervised
+standalone scripts (`pi-task.sh <issue-number> <model>`) still fetch current
+issue text once per invocation.
 
-Snapshots contain full issue text: keep queue state private. The digest is a
+Snapshots contain the full task text: keep queue state private. The digest is a
 snapshot identity, not an authentication signature or a replacement for the
 separate approval and execution-trust gates.
 
@@ -444,13 +525,18 @@ metadata is `null` and the reason (`result_file: 'missing'` or `'invalid'`) is
 appended to the job log and reported by `run-next --json`. There is no fallback
 to scraping stdout, and the process exit code is unchanged.
 
-The shipped executors (`pi-issue.sh`, `pi-workflow.sh`, `claude-issue.sh`, and
-the CUA feedback executor) implement this contract; `src/runners/result-file.js`
+The shipped executors (`pi-task.sh`, `pi-workflow.sh`, `claude-task.sh`, and
+the CUA feedback executor) implement this contract; `pi-issue.sh` and
+`claude-issue.sh` remain as two-line wrappers for callers that invoke them by
+path. `src/runners/executor-input.js` is the shared stdin reader; `src/runners/result-file.js`
 holds the schema, the atomic writer and the reader. A writer failure removes
 any partial file, so the run reports `missing` rather than reading a fragment.
 Custom `--executor` targets and persisted executors receive the same
-`AGENTQ_RESULT` path and are expected to honour it. A standalone run without
-`AGENTQ_RESULT` writes no result file.
+`AGENTQ_RESULT` path and are expected to honour it. They also receive the
+generic `agentq.task-input/v1` shape and its digest on stdin (with
+`AGENTQ_PINNED_INPUT=1` and `AGENTQ_INPUT_SHA256`) and must verify that shape
+instead of the old `agentq.github-issue-input` snapshot. A standalone run
+without `AGENTQ_RESULT` writes no result file.
 
 Two fields are statements by the executor, not by agentq:
 
@@ -1049,10 +1135,10 @@ same way rather than silently running on pi.
 
 ### Executor contract
 
-`claude-issue.sh` is a sibling of `pi-issue.sh` with the identical contract:
+`claude-task.sh` is a sibling of `pi-task.sh` with the identical contract:
 
 ```text
-claude-issue.sh <issue-number> <provider/model> [--agentq-pinned-input]
+claude-task.sh <issue-number|task-id> <provider/model> [--agentq-pinned-input]
 ```
 
 The same pinned snapshot on stdin (`AGENTQ_PINNED_INPUT`,
@@ -1098,7 +1184,7 @@ for pi: the trust gate decides whether the job may run at all, and a `--sandbox`
 wrapper receives `sandbox <executor> ...` unchanged (the claude executor is
 passed through as the first argument, with the pi argument contract).
 
-The SECURITY note at the bottom of `claude-issue.sh` applies: `acceptEdits` is a
+The SECURITY note at the bottom of `claude-task.sh` applies: `acceptEdits` is a
 permission mode, not a sandbox.
 
 ### Usage and session

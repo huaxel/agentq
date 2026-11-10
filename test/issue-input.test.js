@@ -14,6 +14,7 @@ process.env.AGENTQ_QUOTA_REFRESH = '0';
 const { SqliteSource, OrchestratorSource } = require('../src/queue/sources.js');
 const { executeJob } = require('../src/runners/execute.js');
 const { createIssueInput, validateIssueInput, fetchIssueInputAsync } = require('../src/core/issue-input.js');
+const { createTaskInput, taskInputFromIssue, validateTaskInput } = require('../src/core/task-input.js');
 const dbModule = require('../src/queue/db.js');
 
 function rawIssue(number = 42, body = 'original body\n\n') {
@@ -43,19 +44,19 @@ test('enqueue fetches once and requeue retains exact text and digest after the l
   await source.enqueue({ repo, issue: '42', base: 'main', model: 'test/model', trusted: true });
   assert.equal(calls, 1);
   const firstJob = await source.claimNext();
-  const original = firstJob.issue_input;
-  assert.equal(original.issue.body, 'original body\n\n');
+  const original = firstJob.task_input;
+  assert.equal(original.body, 'original body\n\n');
   // Requeue only starts from a terminal status: finish the attempt first.
   await source.sink.finish(firstJob, { status: 'failed', exit: 1 });
   live = rawIssue(42, 'edited after enqueue');
   source.requeue({ id: firstJob.id });
-  assert.deepEqual((await source.claimNext()).issue_input, original);
+  assert.deepEqual((await source.claimNext()).task_input, original);
   assert.equal(calls, 1);
   await source.enqueue({ repo, issue: '42', base: 'main', model: 'test/model', trusted: true });
   assert.equal(calls, 2);
   const jobs = source.status();
-  assert.equal(jobs[1].issue_input.issue.body, 'edited after enqueue');
-  assert.deepEqual(jobs[0].issue_input, original);
+  assert.equal(jobs[1].task_input.body, 'edited after enqueue');
+  assert.deepEqual(jobs[0].task_input, original);
 });
 
 test('failed GitHub capture leaves no enqueued job or approval record', async t => {
@@ -74,18 +75,23 @@ test('tampered or legacy issue inputs are refused before claim or executor launc
   });
   await source.enqueue({ repo, issue: '42', base: 'main', model: 'test/model', trusted: true });
   const job = await source.claimNext();
-  job.issue_input.issue.body = 'changed without its digest';
+  // The stored prompt is the source of truth: tampering the derived field is
+  // ignored, tampering the prompt is what the digest catches.
+  const tampered = JSON.parse(job.prompt);
+  tampered.body = 'changed without its digest';
+  job.prompt = JSON.stringify(tampered);
   const marker = path.join(root, 'launched');
   const executor = path.join(root, 'executor');
   fs.writeFileSync(executor, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o755 });
-  await assert.rejects(executeJob(job, { executor }, source), /pinned issue input/i);
+  await assert.rejects(executeJob(job, { executor }, source), /pinned task input/i);
   assert.equal(fs.existsSync(marker), false);
   // The captured input can never validate, so the refusal is terminal: the
   // task ends failed with the reason instead of being re-pended and re-refused.
   const refused = dbModule.getTask(source.db, job.id);
   assert.equal(refused.status, 'failed');
-  assert.match(JSON.parse(refused.result).error, /pinned issue input/i);
-  delete job.issue_input;
+  assert.match(JSON.parse(refused.result).error, /pinned task input/i);
+  delete job.prompt;
+  delete job.task_input;
   await assert.rejects(executeJob(job, { executor }, source), /enqueue a new job/i);
 });
 
@@ -98,8 +104,8 @@ test('remote enqueue persists the same canonical snapshot in its immutable promp
   let stored;
   source.worker.enqueue = async task => { stored = task; return { id: 'task-1' }; };
   await source.enqueue({ repo, issue: '42', base: 'main', trusted: true });
-  const snapshot = validateIssueInput(JSON.parse(stored.prompt), 42);
-  assert.equal(snapshot.issue.body, 'original body\n\n');
+  const snapshot = validateTaskInput(JSON.parse(stored.prompt), 42);
+  assert.equal(snapshot.body, 'original body\n\n');
 });
 
 test('approved issue input cannot be edited in place and approval records its digest', t => {
@@ -108,6 +114,7 @@ test('approved issue input cannot be edited in place and approval records its di
   dbModule.initSchema(db);
   t.after(() => db.close());
   const input = createIssueInput(rawIssue());
+  const pinned = taskInputFromIssue(input);
   const task = dbModule.createTask(db, {
     kind: 'github_issue', repo, issue_num: 42, prompt: JSON.stringify(input), approval_required: true,
   });
@@ -115,7 +122,7 @@ test('approved issue input cannot be edited in place and approval records its di
   dbModule.approveTask(db, task.id, 'reviewer');
   assert.throws(() => dbModule.updateTaskPrompt(db, task.id, 'replacement'), /immutable/i);
   const event = db.prepare("SELECT payload FROM task_events WHERE task_id = ? AND event = 'approved'").get(task.id);
-  assert.equal(JSON.parse(event.payload).input_sha256, input.sha256);
+  assert.equal(JSON.parse(event.payload).input_sha256, pinned.sha256);
 });
 
 test('changing the task kind cannot make issue-number inputs editable', t => {
@@ -124,14 +131,15 @@ test('changing the task kind cannot make issue-number inputs editable', t => {
   dbModule.initSchema(db);
   t.after(() => db.close());
   const input = createIssueInput(rawIssue());
+  const pinned = taskInputFromIssue(input);
   const task = dbModule.createTask(db, {
     kind: 'prompt', repo, issue_num: 42, prompt: JSON.stringify(input), approval_required: true,
   });
   assert.throws(() => dbModule.updateTaskPrompt(db, task.id, 'replacement'), /immutable/i);
   dbModule.approveTask(db, task.id, 'reviewer');
   const event = db.prepare("SELECT payload FROM task_events WHERE task_id = ? AND event = 'approved'").get(task.id);
-  assert.equal(JSON.parse(event.payload).input_sha256, input.sha256);
-  assert.throws(() => dbModule.createTask(db, { kind: 'prompt', issue_num: 42, prompt: 'not pinned' }), /pinned issue input/i);
+  assert.equal(JSON.parse(event.payload).input_sha256, pinned.sha256);
+  assert.throws(() => dbModule.createTask(db, { kind: 'prompt', issue_num: 42, prompt: 'not pinned' }), /pinned task input/i);
 });
 
 test('new issue API tasks reject missing or corrupted snapshots without creating tasks', t => {
@@ -139,10 +147,10 @@ test('new issue API tasks reject missing or corrupted snapshots without creating
   const db = dbModule.openDb(path.join(root, 'queue.sqlite'));
   dbModule.initSchema(db);
   t.after(() => db.close());
-  assert.throws(() => dbModule.createTask(db, { kind: 'github_issue', repo, issue_num: 42, prompt: 'mutable issue reference' }), /pinned issue input/i);
+  assert.throws(() => dbModule.createTask(db, { kind: 'github_issue', repo, issue_num: 42, prompt: 'mutable issue reference' }), /pinned task input/i);
   const input = createIssueInput(rawIssue());
   input.issue.title = 'tampered';
-  assert.throws(() => dbModule.createTask(db, { kind: 'github_issue', repo, issue_num: 42, prompt: JSON.stringify(input) }), /pinned issue input/i);
+  assert.throws(() => dbModule.createTask(db, { kind: 'github_issue', repo, issue_num: 42, prompt: JSON.stringify(input) }), /pinned task input/i);
   assert.equal(db.prepare('SELECT count(*) AS count FROM tasks').get().count, 0);
 });
 
@@ -152,14 +160,15 @@ test('server completion records the pinned digest and rejects mismatched reports
   dbModule.initSchema(db);
   t.after(() => db.close());
   const input = createIssueInput(rawIssue());
+  const pinned = taskInputFromIssue(input);
   const task = dbModule.createTask(db, { kind: 'github_issue', repo, issue_num: 42, prompt: JSON.stringify(input), model: 'test/model' });
   dbModule.claimNextTask(db, 'worker');
   assert.throws(() => dbModule.completeTask(db, task.id, { status: 'succeeded', input_sha256: 'wrong' }), /digest does not match/i);
   assert.equal(dbModule.getTask(db, task.id).status, 'running');
   dbModule.completeTask(db, task.id, { status: 'succeeded' });
-  assert.equal(JSON.parse(dbModule.getTask(db, task.id).result).input_sha256, input.sha256);
+  assert.equal(JSON.parse(dbModule.getTask(db, task.id).result).input_sha256, pinned.sha256);
   const event = db.prepare("SELECT payload FROM task_events WHERE task_id = ? AND event = 'completed'").get(task.id);
-  assert.equal(JSON.parse(event.payload).input_sha256, input.sha256);
+  assert.equal(JSON.parse(event.payload).input_sha256, pinned.sha256);
 });
 
 test('server completion refuses corrupted pinned snapshots', t => {
@@ -171,7 +180,7 @@ test('server completion refuses corrupted pinned snapshots', t => {
   const task = dbModule.createTask(db, { kind: 'github_issue', repo, issue_num: 42, prompt: JSON.stringify(input), model: 'test/model' });
   dbModule.claimNextTask(db, 'worker');
   db.prepare('UPDATE tasks SET prompt = ? WHERE id = ?').run('corrupted snapshot', task.id);
-  assert.throws(() => dbModule.completeTask(db, task.id, { status: 'succeeded' }), /pinned issue input/i);
+  assert.throws(() => dbModule.completeTask(db, task.id, { status: 'succeeded' }), /pinned task input/i);
   assert.equal(dbModule.getTask(db, task.id).status, 'running');
 });
 
@@ -208,13 +217,13 @@ test('corrupt persisted input is rejected before a parallel claim is appended', 
   const source = new SqliteSource(path.join(root, 'queue.sqlite'), { issueRunner: () => JSON.stringify(rawIssue()) });
   const { id } = await source.enqueue({ repo, issue: '42', base: 'main', trusted: true });
   const stored = JSON.parse(dbModule.getTask(source.db, id).prompt);
-  stored.issue.body = 'tampered';
+  stored.body = 'tampered';
   source.db.prepare('UPDATE tasks SET prompt = ? WHERE id = ?').run(JSON.stringify(stored), id);
   const result = await drainParallel(source, { executor: '/must-not-launch' }, 2);
   assert.equal(result.ran, 0);
   assert.equal(result.blocked, 1);
   assert.equal(source.status()[0].status, 'blocked');
-  assert.match(source.status()[0].input_error, /pinned issue input/i);
+  assert.match(source.status()[0].input_error, /pinned task input/i);
   assert.equal(dbModule.listTaskEvents(source.db, id).filter(event => event.event === 'claimed').length, 0);
 });
 
@@ -283,10 +292,27 @@ for (const { workflow, stripAll } of [
   });
 }
 
-for (const mode of ['valid', 'stripped', 'wrong-digest']) {
+/**
+ * The pinned input each Jules mode feeds on stdin. `wrong-issue` is a valid
+ * snapshot for issue 43 running as issue 42; `no-url` is a GitHub input whose
+ * URL is absent (a standalone capture may omit it).
+ */
+function julesInput(mode) {
+  if (mode === 'wrong-issue') {
+    return taskInputFromIssue(createIssueInput(rawIssue(43, 'snapshot for another issue')));
+  }
+  if (mode === 'no-url') {
+    return createTaskInput({
+      source: 'github', ref: '42', title: 'No URL issue', body: 'body without a url', url: null,
+    }, '2026-11-02T00:00:00.000Z');
+  }
+  return taskInputFromIssue(createIssueInput(rawIssue(42, 'Pinned Jules body: `literal` and $shell\n\n')));
+}
+
+for (const mode of ['valid', 'stripped', 'wrong-digest', 'wrong-issue', 'no-url']) {
   test(`Jules uses pinned stdin without live issue or repository lookup (${mode})`, t => {
     const { repo } = workspace(t);
-    const input = createIssueInput(rawIssue(42, 'Pinned Jules body: `literal` and $shell\n\n'));
+    const input = julesInput(mode);
     const env = { PATH: process.env.PATH };
     if (mode !== 'stripped') Object.assign(env, {
       AGENTQ_PINNED_INPUT: '1', AGENTQ_INPUT_SHA256: mode === 'wrong-digest' ? 'a'.repeat(64) : input.sha256,
@@ -316,24 +342,34 @@ for (const mode of ['valid', 'stripped', 'wrong-digest']) {
       const options = JSON.parse(result.stdout);
       assert.equal(options.source, 'sources/test/repo');
       assert.equal(options.baseBranch, 'main');
-      assert.ok(options.prompt.includes(input.issue.title));
-      assert.ok(options.prompt.includes(input.issue.body));
+      assert.ok(options.prompt.includes(input.title));
+      assert.ok(options.prompt.includes(input.body));
+    } else if (mode === 'no-url') {
+      // A pinned input without an issue URL is refused by name, never a
+      // TypeError from `new URL(null)`.
+      assert.equal(result.status, 19, result.stderr);
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /no issue URL/i);
+      assert.doesNotMatch(result.stderr, /TypeError|Invalid URL/i);
     } else {
       assert.equal(result.status, 19, result.stderr);
       assert.equal(result.stdout, '');
-      assert.match(result.stderr, mode === 'stripped' ? /requires pinned input metadata/ : /invalid pinned issue input/i);
+      assert.match(result.stderr, mode === 'stripped' ? /requires pinned input metadata/ : /invalid pinned task input/i);
     }
   });
 }
 
 test('invalid remotely claimed input releases the claim without retries', async () => {
-  const input = createIssueInput(rawIssue());
-  input.issue.body = 'tampered';
+  const input = taskInputFromIssue(createIssueInput(rawIssue()));
+  const tampered = { ...input, body: 'tampered' };
   let refusal;
-  await assert.rejects(executeJob({ id: 'remote', kind: 'github_issue', issue_number: 42, issue_input: input, trusted: true }, {}, {
+  await assert.rejects(executeJob({
+    id: 'remote', kind: 'github_issue', issue_number: 42,
+    task_input: tampered, prompt: JSON.stringify(tampered), trusted: true,
+  }, {}, {
     claimIsRemote: true,
     sink: { recover: async (...args) => { refusal = args; } },
-  }), /pinned issue input/i);
+  }), /pinned task input/i);
   assert.deepEqual(refusal[2], { retryable: false });
 });
 
@@ -353,7 +389,7 @@ for (const workflow of [false, true]) {
       await source.enqueue({ repo, issue: '42', base: 'main', model: 'test/model', trusted: true });
       // claimNext commits the claim, so the same job object is executed below.
       const job = await source.claimNext();
-      const pinned = job.issue_input;
+      const pinned = job.task_input;
       live = rawIssue(42, 'replacement live requirements');
       const bin = path.join(root, 'bin');
       fs.mkdirSync(bin);

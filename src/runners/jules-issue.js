@@ -26,7 +26,7 @@
 const { execFileSync } = require('node:child_process');
 const { listSources, createSession, getSession } = require('../lib/jules-api.js');
 const { pollJulesSession, extractSessionId } = require('../queue/jules-sync.js');
-const { readPinnedIssue } = require('../core/issue-input.js');
+const { readPinnedTaskInput } = require('../core/task-input.js');
 
 const POLL_INTERVAL_MS = Number(process.env.JULES_POLL_INTERVAL_MS) || 10000;
 const TIMEOUT_MS = Number(process.env.JULES_TIMEOUT_MS) || 30 * 60 * 1000;
@@ -148,10 +148,19 @@ async function main() {
       || !process.env.AGENTQ_WORKTREE || !process.env.BASE_BRANCH)) {
     throw new Error('Queued issue execution requires pinned input metadata; forward it through the sandbox.');
   }
-  const pinned = process.env.AGENTQ_PINNED_INPUT === '1' ? readPinnedIssue(issue) : null;
-  const ownerRepo = pinned ? new URL(pinned.issue.url).pathname.split('/').slice(1, 3).join('/') : detectOwnerRepo();
+  // The issue number is this run's identity: a pinned snapshot for another
+  // issue must be refused, not run under the wrong number.
+  const pinned = process.env.AGENTQ_PINNED_INPUT === '1' ? readPinnedTaskInput(issue) : null;
+  // Jules works GitHub issues only: it needs the issue's owner/repo and opens a
+  // PR there. A spec task has no such target, so it is refused rather than run
+  // against the wrong repository.
+  if (pinned && pinned.source !== 'github') throw new Error('Jules runs GitHub issue tasks only.');
+  if (pinned && !pinned.url) {
+    throw new Error('Pinned task input has no issue URL; Jules needs the issue owner and repository.');
+  }
+  const ownerRepo = pinned ? new URL(pinned.url).pathname.split('/').slice(1, 3).join('/') : detectOwnerRepo();
   const base = process.env.BASE_BRANCH || 'main';
-  const { title, body } = pinned ? pinned.issue : fetchIssue(ownerRepo, issue);
+  const { title, body } = pinned ?? fetchIssue(ownerRepo, issue);
   const prompt = buildPrompt(issue, title, body, process.env.AGENTQ_STOP_WHEN);
   const source = await findSource(ownerRepo);
 

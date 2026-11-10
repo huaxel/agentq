@@ -11,7 +11,7 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { nowIso, uuidv4, json, parseJson } = require('./db-helpers.js');
 const { normalizeUsage } = require('../lib/usage-normalize.js');
-const { validateIssueInput, issueInputFromPrompt } = require('../core/issue-input.js');
+const { pinTaskInput, validateTaskJob } = require('../core/task-input.js');
 const { REVIEW_SOURCES, REVIEW_TIERS, REVIEW_VERDICTS } = require('../core/track-record.js');
 const {
   getRateLimits,
@@ -376,9 +376,9 @@ function createTask(db, task) {
     throw err;
   }
 
-  const issueInput = task.kind === 'github_issue' || task.issue_num != null
-    ? validateIssueInput(Number.isSafeInteger(task.issue_num) && task.issue_num > 0
-      ? issueInputFromPrompt(task.prompt, task.issue_num) : null, task.issue_num) : null;
+  // One conversion point on the write path: a legacy issue snapshot and a
+  // generic task input both end up stored in the generic shape.
+  const pinnedInput = pinTaskInput(task);
 
   try {
     db.exec('BEGIN IMMEDIATE');
@@ -398,7 +398,7 @@ function createTask(db, task) {
       task.repo || null,
       task.issue_num || null,
       task.base_branch || null,
-      issueInput ? JSON.stringify(issueInput) : task.prompt || null,
+      pinnedInput ? JSON.stringify(pinnedInput) : task.prompt || null,
       json(task.depends_on),
       task.model || null,
       task.provider || null,
@@ -414,7 +414,7 @@ function createTask(db, task) {
     db.prepare(`
       INSERT INTO task_events (task_id, event, payload, created_at)
       VALUES (?, 'created', ?, ?)
-    `).run(id, json({ kind: task.kind, source: task.source, input_sha256: issueInput?.sha256 }), ts);
+    `).run(id, json({ kind: task.kind, source: task.source, input_sha256: pinnedInput?.sha256 }), ts);
 
     if (task.depends_on && Array.isArray(task.depends_on)) {
       // Validate each dependency exists as a task
@@ -455,7 +455,7 @@ function createTask(db, task) {
       repo: task.repo || null,
       issue_num: task.issue_num || null,
       base_branch: task.base_branch || null,
-      prompt: task.prompt || null,
+      prompt: pinnedInput ? JSON.stringify(pinnedInput) : task.prompt || null,
       model: task.model || null,
       provider: task.provider || null,
       executor: task.executor || null,
@@ -487,7 +487,8 @@ function createTask(db, task) {
  * @param {string} [options.model]
  * @param {string} [options.modelOverride]
  * @param {number} [options.maxAttempts]
- * @param {((model: string) => { model: string, provider: string|null })|null} [options.resolveAutoModel]
+ * @param {((model: string, candidate: object) => { model: string, provider: string|null })|null} [options.resolveAutoModel]
+ *   called per candidate so the resolver can read that task's stored routing policy
  * @param {number} [options.leaseMinutes]
  * @param {string[]} [options.trustLevels] only claim these `trust_level` values
  * @param {string[]} [options.excludeKinds] never claim these kinds
@@ -585,7 +586,7 @@ function claimNextTask(db, workerId, {
     let task = { ...candidate };
     if (task.model == null && modelOverride) {
       try {
-        const resolved = resolveAutoModel ? resolveAutoModel(modelOverride) : { model: modelOverride, provider: null };
+        const resolved = resolveAutoModel ? resolveAutoModel(modelOverride, task) : { model: modelOverride, provider: null };
         task = { ...task, model: resolved.model, provider: resolved.provider };
       } catch {
         // no headroom or invalid routing; skip and try next candidate
@@ -593,7 +594,7 @@ function claimNextTask(db, workerId, {
       }
     } else if (task.model === 'auto' && resolveAutoModel) {
       try {
-        const resolved = resolveAutoModel(task.model);
+        const resolved = resolveAutoModel(task.model, task);
         task = { ...task, model: resolved.model, provider: resolved.provider };
       } catch {
         // no headroom for this task; skip and try next candidate
@@ -821,16 +822,16 @@ function completeTask(db, taskId, result, { claimedBy, claimToken } = {}) {
       throw new Error(`Task not running or not claimed by this worker: ${taskId}`);
     }
 
-    const isIssueTask = existing.kind === 'github_issue' || existing.issue_num != null;
-    const issueInput = issueInputFromPrompt(existing.prompt, existing.issue_num);
-    if (isIssueTask) validateIssueInput(issueInput, existing.issue_num);
-    if (issueInput) {
-      if (result.input_sha256 != null && result.input_sha256 !== issueInput.sha256) {
+    const pinnedInput = validateTaskJob({
+      kind: existing.kind, issue_number: existing.issue_num, prompt: existing.prompt,
+    });
+    if (pinnedInput) {
+      if (result.input_sha256 != null && result.input_sha256 !== pinnedInput.sha256) {
         const error = new Error('Completion input digest does not match the immutable task snapshot.');
         error.statusCode = 400;
         throw error;
       }
-      result = { ...result, input_sha256: issueInput.sha256 };
+      result = { ...result, input_sha256: pinnedInput.sha256 };
     }
 
     // A failure with attempts remaining is re-pended (server-side retry via
@@ -1278,8 +1279,9 @@ function approveTask(db, taskId, approvedBy) {
       throw new Error(`Task ${taskId} not found or already approved`);
     }
 
-    const issueInput = task.kind === 'github_issue' || task.issue_num != null
-      ? validateIssueInput(issueInputFromPrompt(task.prompt, task.issue_num), task.issue_num) : null;
+    const pinnedInput = validateTaskJob({
+      kind: task.kind, issue_number: task.issue_num, prompt: task.prompt,
+    });
     db.prepare(`
       UPDATE tasks SET
         approval_required = 0,
@@ -1291,7 +1293,7 @@ function approveTask(db, taskId, approvedBy) {
     db.prepare(`
       INSERT INTO task_events (task_id, event, payload, created_at)
       VALUES (?, 'approved', ?, ?)
-    `).run(taskId, json({ approved_by: approvedBy, input_sha256: issueInput?.sha256 }), ts);
+    `).run(taskId, json({ approved_by: approvedBy, input_sha256: pinnedInput?.sha256 }), ts);
 
     db.exec('COMMIT');
 
@@ -1517,7 +1519,9 @@ function updateTaskPriority(db, taskId, priority) {
 function updateTaskPrompt(db, taskId, prompt) {
   const task = db.prepare('SELECT id, status, kind, issue_num FROM tasks WHERE id = ?').get(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
-  if (task.kind === 'github_issue' || task.issue_num != null) throw new Error('Pinned GitHub issue input is immutable; enqueue a new task for changed requirements.');
+  if (task.kind === 'github_issue' || task.kind === 'spec' || task.issue_num != null) {
+    throw new Error('Pinned task input is immutable; enqueue a new task for changed requirements.');
+  }
   if (task.status !== 'pending') throw new Error(`Cannot change prompt of task in '${task.status}' status`);
   db.prepare('UPDATE tasks SET prompt = ? WHERE id = ?').run(prompt, taskId);
   return db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);

@@ -192,6 +192,69 @@ test('enqueue_task awaits an async issue capture', async () => {
   assert.equal(result.status, 'pending');
 });
 
+test('enqueue_task accepts an inline spec, always untrusted and approval-gated', () => {
+  const { deps, calls } = fakeDeps();
+  const result = tool('enqueue_task', deps).handler({
+    kind: 'spec', repo: REPO, title: 'Inline spec', body: 'Do the work.', priority: 3,
+  });
+  const created = calls.createTask[0];
+  assert.equal(created.kind, 'spec');
+  assert.equal(created.issue_num, undefined);
+  assert.equal(created.source, 'mcp');
+  assert.equal(created.trust_level, 'untrusted');
+  assert.equal(created.approval_required, 1);
+  const pinned = JSON.parse(created.prompt);
+  assert.equal(pinned.type, 'agentq.task-input/v1');
+  assert.equal(pinned.source, 'inline');
+  assert.equal(pinned.ref, null);
+  assert.equal(pinned.title, 'Inline spec');
+  assert.equal(pinned.body, 'Do the work.');
+  assert.match(pinned.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(result.approval_required, true);
+  assert.equal(calls.captureIssueInput.length, 0, 'a spec never touches gh');
+});
+
+test('enqueue_task spec takes inline text only: no file path, no prompt, no issue', () => {
+  const { deps } = fakeDeps();
+  const entry = tool('enqueue_task', deps);
+  const properties = Object.keys(entry.inputSchema.properties);
+  for (const forbidden of ['path', 'file', 'spec_path', 'spec_file', 'spec']) {
+    assert.ok(!properties.includes(forbidden), `${forbidden} must not be an argument`);
+  }
+  assert.throws(
+    () => entry.handler({ kind: 'spec', repo: REPO, title: 'x', body: 'y', path: '/tmp/x.md' }),
+    /Unknown argument: path/,
+  );
+  assert.throws(() => entry.handler({ kind: 'spec', repo: REPO, title: 'x' }), /body is required/);
+  assert.throws(() => entry.handler({ kind: 'spec', repo: REPO, body: 'y' }), /title is required/);
+  assert.throws(
+    () => entry.handler({ kind: 'spec', repo: REPO, title: 'x', body: 'y', prompt: 'p' }),
+    /prompt is not allowed for kind "spec"/,
+  );
+  assert.throws(
+    () => entry.handler({ kind: 'spec', repo: REPO, title: 'x', body: 'y', issue: 3 }),
+    /issue is only valid for kind "github_issue"/,
+  );
+  assert.throws(
+    () => entry.handler({ kind: 'prompt', repo: REPO, prompt: 'p', title: 'x', body: 'y' }),
+    /title and body are only valid for kind "spec"/,
+  );
+});
+
+test('enqueue_task spec names a NUL byte instead of the generic refusal', () => {
+  const { deps, calls } = fakeDeps();
+  const entry = tool('enqueue_task', deps);
+  assert.throws(
+    () => entry.handler({ kind: 'spec', repo: REPO, title: 'Spec', body: 'before\0after' }),
+    /Task body must not contain a NUL byte/,
+  );
+  assert.throws(
+    () => entry.handler({ kind: 'spec', repo: REPO, title: 'bad\0title', body: 'body' }),
+    /Task title must not contain a NUL byte/,
+  );
+  assert.equal(calls.createTask.length, 0, 'a refused spec creates no task');
+});
+
 test('a failed issue capture creates no task', () => {
   const { deps, calls } = fakeDeps({
     captureIssueInput: () => {

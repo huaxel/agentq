@@ -9,6 +9,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -41,8 +42,32 @@ test('pi-workflow.sh JSON-encodes the issue title in the generated meta', () => 
   assert.ok(SCRIPT.includes("'Implement GitHub issue #${ISSUE}: ' + ${TITLE_JS}"));
 });
 
+for (const wrapper of ['pi-task.sh', 'claude-task.sh']) {
+  test(`${wrapper} validates the standalone issue number before calling gh`, (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentq-standalone-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    const called = path.join(dir, 'gh-called');
+    // Any gh invocation proves the validation ran too late.
+    fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh\ntouch ${JSON.stringify(called)}\nexit 99\n`, { mode: 0o755 });
+
+    for (const subject of ['not-a-number', '0', '-5', '12abc']) {
+      const result = spawnSync('bash', [path.join(ROOT, wrapper), subject, 'test/model'], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+      });
+      assert.equal(result.status, 2, `${wrapper} ${subject}: ${result.stderr}`);
+      assert.match(result.stderr, /standalone mode needs a positive issue number/);
+      assert.equal(fs.existsSync(called), false, `${wrapper} must not call gh for ${subject}`);
+    }
+  });
+}
+
 for (const [wrapper, usage] of [
-  ['pi-issue.sh', /usage: pi-issue\.sh <issue-number> <provider\/model>/],
+  ['pi-task.sh', /usage: pi-task\.sh <issue-number\|task-id> <provider\/model>/],
+  ['claude-task.sh', /usage: claude-task\.sh <issue-number\|task-id> <provider\/model>/],
   ['pi-workflow.sh', /usage: pi-workflow\.sh <issue-number> <provider\/model>/],
 ]) {
   test(`${wrapper} requires an explicit model instead of defaulting to a dropped subscription`, () => {

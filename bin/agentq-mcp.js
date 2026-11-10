@@ -56,7 +56,7 @@ function pathHealthStore() {
 function trackRecordStore() {
   return require('../src/queue/track-records.js');
 }
-const { fetchIssueInputAsync } = require('../src/core/issue-input.js');
+const { fetchTaskInputAsync } = require('../src/core/task-input.js');
 
 const { homeDataPath } = require('../src/lib/home.js');
 
@@ -274,7 +274,7 @@ const deps = {
  * @returns {Promise<Record<string, any>>}
  */
 async function captureIssueInput(repo, issueNumber) {
-  return fetchIssueInputAsync(repo, issueNumber);
+  return fetchTaskInputAsync(repo, issueNumber);
 }
 
 const writeDeps = {

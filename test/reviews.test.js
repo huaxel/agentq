@@ -395,6 +395,31 @@ test('review_task prefers the latest event, an explicit tier, and falls back to 
   );
 });
 
+test('review_task falls back to the tier stored at enqueue', () => {
+  const { deps, calls } = reviewDeps({
+    getTask: (id) => ({
+      id, status: 'succeeded', model: 'stored/model', routing_policy: JSON.stringify({ tier: 'big' }),
+    }),
+  });
+  const result = tool(buildWriteTools(deps), 'review_task').handler({ id: 't1', verdict: 'accepted' });
+  assert.equal(result.tier, 'big');
+  assert.equal(calls.addReview[0].tier, 'big');
+
+  // A dispatch event still wins over the stored policy.
+  const dispatched = reviewDeps({
+    getTask: (id) => ({
+      id, status: 'succeeded', model: 'auto', routing_policy: JSON.stringify({ tier: 'big' }),
+    }),
+    listTaskEvents: () => [
+      { event: 'model-chosen', payload: JSON.stringify({ model: 'ran/model', tier: 'small' }) },
+    ],
+  });
+  assert.equal(
+    tool(buildWriteTools(dispatched.deps), 'review_task').handler({ id: 't1', verdict: 'accepted' }).tier,
+    'small',
+  );
+});
+
 test('review_task records into a real queue and track_records reads it back', () => {
   const root = tmpdir();
   const { db } = openFreshDb(root);

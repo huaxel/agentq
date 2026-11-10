@@ -939,7 +939,7 @@ test('the exact request shape submitCreateTask sends is accepted by POST /api/ta
     const task2 = dbMod.getTask(db, res2.data.id);
     assert.equal(task2.issue_num, 7);
     assert.equal(task2.trust_level, 'trusted_agent');
-    assert.equal(JSON.parse(task2.prompt).issue.body, 'fixture body');
+    assert.equal(JSON.parse(task2.prompt).body, 'fixture body');
     assert.match(JSON.parse(task2.prompt).sha256, /^[a-f0-9]{64}$/);
 
     // The form's 'untrusted' option does force approval_required — unlike

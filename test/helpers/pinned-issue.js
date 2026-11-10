@@ -5,7 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { after } = require('node:test');
 const source = require('../../src/queue/sources.js');
-const { createIssueInput, issueInputFromPrompt } = require('../../src/core/issue-input.js');
+const { createIssueInput } = require('../../src/core/issue-input.js');
+const { taskInputFromIssue, taskInputFromPrompt } = require('../../src/core/task-input.js');
 
 function rawIssue(number, body = 'fixture body') {
   return { number: Number(number), title: 'Fixture issue', body,
@@ -24,8 +25,14 @@ class OrchestratorSource extends source.OrchestratorSource {
   constructor(url, workerId, options = {}) { super(url, workerId, { issueRunner, ...options }); }
 }
 
+/** Legacy `agentq.github-issue-input` snapshot (what an old queue row holds). */
 function snapshotForIssue(number, body) {
   return createIssueInput(rawIssue(number, body));
+}
+
+/** The generic pinned input a current queue row stores. */
+function taskInputForIssue(number, body) {
+  return taskInputFromIssue(snapshotForIssue(number, body));
 }
 
 // Positive scheduling fixtures need a complete request now. Snapshot-policy
@@ -33,7 +40,7 @@ function snapshotForIssue(number, body) {
 function pinnedTask(task) {
   if (task.kind !== 'github_issue') return task;
   const number = task.issue_num ?? 1;
-  if (issueInputFromPrompt(task.prompt, number)) return task;
+  if (taskInputFromPrompt(task.prompt, number)) return task;
   return { ...task, issue_num: number, prompt: JSON.stringify(snapshotForIssue(number, task.prompt || 'fixture body')) };
 }
 
@@ -53,4 +60,6 @@ function githubEnv() {
   return { PATH: `${tools}${path.delimiter}${process.env.PATH}` };
 }
 
-module.exports = { SqliteSource, OrchestratorSource, snapshotForIssue, pinnedTask, githubEnv, rawIssue };
+module.exports = {
+  SqliteSource, OrchestratorSource, snapshotForIssue, taskInputForIssue, pinnedTask, githubEnv, rawIssue,
+};

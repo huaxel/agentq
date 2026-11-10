@@ -13,7 +13,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
-const { githubEnv, snapshotForIssue, SqliteSource } = require('./helpers/pinned-issue.js');
+const { githubEnv, taskInputForIssue, SqliteSource } = require('./helpers/pinned-issue.js');
 const AGENTQ = require.resolve('../src/interfaces/cli/agentq.js');
 const { drain } = require('../src/interfaces/cli/agentq.js');
 
@@ -40,9 +40,9 @@ fs.writeFileSync(path.join(HOME, 'config', 'runnables.json'), JSON.stringify({
 }));
 process.env.AGENTQ_HOME = HOME;
 
-const SCRIPT = path.join(ROOT, 'claude-issue.sh');
-const PI_EXECUTOR = path.join(ROOT, 'pi-issue.sh');
-const CLAUDE_EXECUTOR = path.join(ROOT, 'claude-issue.sh');
+const SCRIPT = path.join(ROOT, 'claude-task.sh');
+const PI_EXECUTOR = path.join(ROOT, 'pi-task.sh');
+const CLAUDE_EXECUTOR = path.join(ROOT, 'claude-task.sh');
 const CLAUDE_MODEL = 'claude/claude-sonnet-5-5';
 const SESSION_ID = 'sess-claude-0001';
 
@@ -223,14 +223,14 @@ test('a claude-harness job runs Claude Code headless in the job worktree', () =>
   }
 });
 
-test('claude-issue.sh writes the session, usage and stop sentinel to AGENTQ_RESULT', () => {
+test('claude-task.sh writes the session, usage and stop sentinel to AGENTQ_RESULT', () => {
   const root = tmpdir();
   const repo = makeGitRepo(root);
   const worktree = path.join(root, 'reused-worktree');
   fs.mkdirSync(worktree);
   const resultPath = path.join(root, 'result.json');
   const fake = writeFakeClaude(root, { result: 'Done.\nSHOULD_FULLY_STOP=true' });
-  const snapshot = snapshotForIssue(42, 'fixture body');
+  const snapshot = taskInputForIssue(42, 'fixture body');
 
   const result = runScript(['42', CLAUDE_MODEL, '--agentq-pinned-input'], {
     PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
@@ -260,14 +260,14 @@ test('claude-issue.sh writes the session, usage and stop sentinel to AGENTQ_RESU
   assert.ok(!call.argv.includes('--max-turns'), 'no --max-turns without AGENTQ_MAX_TURNS');
 });
 
-test('claude-issue.sh keeps pi-issue.sh argument and pinned-input contract', () => {
+test('claude-task.sh keeps pi-task.sh argument and pinned-input contract', () => {
   const root = tmpdir();
   const repo = makeGitRepo(root);
   const worktree = path.join(root, 'reused-worktree');
   fs.mkdirSync(worktree);
   const fake = writeFakeClaude(root);
   const env = { PATH: `${fake.dir}${path.delimiter}${process.env.PATH}` };
-  const snapshot = snapshotForIssue(42, 'fixture body');
+  const snapshot = taskInputForIssue(42, 'fixture body');
   const pinned = {
     AGENTQ_PINNED_INPUT: '1',
     AGENTQ_INPUT_SHA256: snapshot.sha256,
@@ -279,7 +279,7 @@ test('claude-issue.sh keeps pi-issue.sh argument and pinned-input contract', () 
   for (const args of [[], ['42'], ['42', '--agentq-pinned-input']]) {
     const result = runScript(args, env, { cwd: repo });
     assert.equal(result.status, 2, `args ${JSON.stringify(args)}`);
-    assert.match(result.stderr, /usage: claude-issue\.sh <issue-number> <model>/);
+    assert.match(result.stderr, /usage: claude-task\.sh <issue-number\|task-id> <provider\/model>/);
   }
 
   // Pinned-input metadata missing from the environment.
@@ -292,33 +292,33 @@ test('claude-issue.sh keeps pi-issue.sh argument and pinned-input contract', () 
   // A queued job (AGENTQ_JOB_ID) must never fall back to a live gh fetch.
   const queued = runScript(['42', CLAUDE_MODEL], { ...env, AGENTQ_JOB_ID: 'job-1' }, { cwd: repo });
   assert.equal(queued.status, 1);
-  assert.match(queued.stderr, /Queued issue execution requires pinned input/);
+  assert.match(queued.stderr, /Queued task execution requires pinned input/);
 
   // A tampered snapshot is refused rather than replaced with live text.
   const tampered = runScript(['42', CLAUDE_MODEL, '--agentq-pinned-input'], {
     ...env, ...pinned, AGENTQ_INPUT_SHA256: 'deadbeef',
   }, { cwd: repo, input: JSON.stringify(snapshot) });
   assert.equal(tampered.status, 1);
-  assert.match(tampered.stderr, /Invalid issue input/);
+  assert.match(tampered.stderr, /Invalid task input/);
 
   // A snapshot for a different issue number is refused too.
   const wrongIssue = runScript(['43', CLAUDE_MODEL, '--agentq-pinned-input'], {
     ...env, ...pinned,
   }, { cwd: repo, input: JSON.stringify(snapshot) });
   assert.equal(wrongIssue.status, 1);
-  assert.match(wrongIssue.stderr, /Invalid issue input/);
+  assert.match(wrongIssue.stderr, /Invalid task input/);
 
   // None of the refusals may launch Claude Code.
   assert.equal(fs.existsSync(fake.record), false, 'no refusal may reach the model');
 });
 
-test('claude-issue.sh rejects a malformed AGENTQ_MAX_TURNS', () => {
+test('claude-task.sh rejects a malformed AGENTQ_MAX_TURNS', () => {
   const root = tmpdir();
   const repo = makeGitRepo(root);
   const worktree = path.join(root, 'reused-worktree');
   fs.mkdirSync(worktree);
   const fake = writeFakeClaude(root);
-  const snapshot = snapshotForIssue(42);
+  const snapshot = taskInputForIssue(42);
   const result = runScript(['42', CLAUDE_MODEL, '--agentq-pinned-input'], {
     PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
     AGENTQ_PINNED_INPUT: '1',
@@ -338,7 +338,7 @@ function runWithSettings(extraEnv) {
   const worktree = path.join(root, 'reused-worktree');
   fs.mkdirSync(worktree);
   const fake = writeFakeClaude(root);
-  const snapshot = snapshotForIssue(42);
+  const snapshot = taskInputForIssue(42);
   const result = runScript(['42', CLAUDE_MODEL, '--agentq-pinned-input'], {
     PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
     AGENTQ_PINNED_INPUT: '1',
@@ -392,7 +392,7 @@ test('a reported is_error result is not recorded as success', () => {
   fs.mkdirSync(worktree);
   // Exit code 0 but is_error=true: the CLI must not report a successful run.
   const fake = writeFakeClaude(root, { exit: 0, isError: true, result: 'boom' });
-  const snapshot = snapshotForIssue(42);
+  const snapshot = taskInputForIssue(42);
   const result = runScript(['42', CLAUDE_MODEL, '--agentq-pinned-input'], {
     PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
     AGENTQ_PINNED_INPUT: '1',
@@ -410,7 +410,7 @@ test('an unreadable Claude result is a failure even when the process exits 0', (
   const repo = makeGitRepo(root);
   const worktree = path.join(root, 'reused-worktree');
   fs.mkdirSync(worktree);
-  const snapshot = snapshotForIssue(42);
+  const snapshot = taskInputForIssue(42);
   const env = {
     AGENTQ_PINNED_INPUT: '1',
     AGENTQ_INPUT_SHA256: snapshot.sha256,
@@ -434,7 +434,7 @@ test('the raw result dump on a parse failure is bounded', () => {
   const repo = makeGitRepo(root);
   const worktree = path.join(root, 'reused-worktree');
   fs.mkdirSync(worktree);
-  const snapshot = snapshotForIssue(42);
+  const snapshot = taskInputForIssue(42);
   // Untrusted, unbounded output: 200 KiB of non-JSON text.
   const fake = writeFakeClaude(root, { exit: 0, stdout: 'Z'.repeat(200 * 1024) });
   const result = runScript(['42', CLAUDE_MODEL, '--agentq-pinned-input'], {

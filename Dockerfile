@@ -12,7 +12,7 @@ WORKDIR /app
 COPY . .
 
 # Prune anything the .dockerignore missed
-RUN rm -rf test scripts *.md justfile pi-issue.sh *.xlsx osxphotos_crash.log jules_test.txt 2>/dev/null; \
+RUN rm -rf test scripts *.md justfile pi-issue.sh claude-issue.sh pi-task.sh claude-task.sh *.xlsx osxphotos_crash.log jules_test.txt 2>/dev/null; \
     find . -name \*.test.js -o -name \*.spec.js | xargs rm -f 2>/dev/null; \
     chown -R node:node /app
 

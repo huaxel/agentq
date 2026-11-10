@@ -227,7 +227,7 @@ All four declare `readOnlyHint: false`, `destructiveHint: false`, and
 
 ### `enqueue_task`
 
-`{ kind: 'prompt'|'github_issue', repo, issue?, prompt?, model?, priority?, depends_on? }`
+`{ kind: 'prompt'|'github_issue'|'spec', repo, issue?, prompt?, title?, body?, model?, priority?, depends_on? }`
 
 - `repo` must be an absolute path to an existing Git repository: it is
   resolved with `realpath` and must be a directory containing `.git` (a
@@ -238,6 +238,11 @@ All four declare `readOnlyHint: false`, `destructiveHint: false`, and
   captures the pinned snapshot itself (bounded `gh issue view`, same capture
   function the orchestrator's create-task route uses). If capture fails the
   call returns a tool error and **no task is created**.
+- `kind: 'spec'` requires inline `title` and `body` (both size-limited) and
+  rejects `issue` and `prompt`. The server never reads a file path from an MCP
+  caller: the spec text travels in the arguments and is pinned as an `inline`
+  task input. This is how an orchestrator queues a spec; for a local file, use
+  the CLI's `enqueue --spec`.
 - `kind: 'prompt'` requires `prompt` and rejects `issue`.
 - `model` defaults to `auto`, `priority` to `0` (range -100..100),
   `depends_on` to none (max 20 task ids).
@@ -336,7 +341,7 @@ Refused, with the reason, when:
 | --- | --- |
 | the task does not exist, or is not `pending` | dispatch never re-runs finished work or steals a running task |
 | approval is `pending` or `rejected` | MCP cannot approve anything; a human approves in the orchestrator dashboard or CLI first |
-| the task kind is not `github_issue` | the spawned worker claims one kind and gets no `--kind`/executor flags; other kinds need a boundary this server does not configure |
+| the task kind is not `github_issue` or `spec` | the spawned worker runs one executor family and gets no `--kind`/executor flags; other kinds (feedback) need a boundary this server does not configure |
 | admission refuses the task with this server's boundary | the same `admit()` gate the worker runs; an untrusted task with neither `--dispatch-sandbox` nor `--dispatch-allow-untrusted` is refused here instead of dying in the log |
 | a dependency has not succeeded | the blocking ids and statuses are listed; the worker would refuse the same claim |
 | the model is not dispatchable (see above) | a runnable must not outlive its subscription, and a saturated or unmeasured path must not be chosen silently |

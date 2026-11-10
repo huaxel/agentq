@@ -39,13 +39,17 @@ const {
   admissionJob,
 } = require('./shape.js');
 const { REVIEW_TIERS, REVIEW_VERDICTS } = require('../../core/track-record.js');
+const { createInlineTaskInput } = require('../../core/task-input.js');
+const { storedTier } = require('../../core/auto-model.js');
 
 /** Names of the tools this module builds. */
 const WRITE_TOOL_NAMES = ['enqueue_task', 'claim_task', 'complete_task', 'review_task'];
 
-const ENQUEUE_KINDS = ['prompt', 'github_issue'];
+const ENQUEUE_KINDS = ['prompt', 'github_issue', 'spec'];
 const COMPLETE_STATUSES = ['succeeded', 'failed'];
 const MAX_SUMMARY_CHARS = 4000;
+const MAX_SPEC_TITLE_CHARS = 500;
+const MAX_SPEC_BODY_CHARS = 100000;
 const MAX_DEPENDS_ON = 20;
 
 /**
@@ -201,7 +205,7 @@ function buildWriteTools(deps) {
           kind: {
             type: 'string',
             enum: ENQUEUE_KINDS,
-            description: '"github_issue" to work a GitHub issue, "prompt" for a free-form instruction.',
+            description: '"github_issue" to work a GitHub issue, "spec" for an inline specification, "prompt" for a free-form instruction.',
           },
           repo: {
             type: 'string',
@@ -216,6 +220,16 @@ function buildWriteTools(deps) {
             type: 'string',
             maxLength: 100000,
             description: 'Task instruction. Required for kind "prompt", invalid otherwise.',
+          },
+          title: {
+            type: 'string',
+            maxLength: MAX_SPEC_TITLE_CHARS,
+            description: `Spec title. Required for kind "spec", invalid otherwise (max ${MAX_SPEC_TITLE_CHARS} characters).`,
+          },
+          body: {
+            type: 'string',
+            maxLength: MAX_SPEC_BODY_CHARS,
+            description: `Spec body, the whole specification text. Required for kind "spec", invalid otherwise (max ${MAX_SPEC_BODY_CHARS} characters).`,
           },
           model: {
             type: 'string',
@@ -242,7 +256,7 @@ function buildWriteTools(deps) {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       handler(args) {
-        assertKnownArgs(args, ['kind', 'repo', 'issue', 'prompt', 'model', 'priority', 'depends_on']);
+        assertKnownArgs(args, ['kind', 'repo', 'issue', 'prompt', 'title', 'body', 'model', 'priority', 'depends_on']);
         const kind = optionalEnum(args, 'kind', ENQUEUE_KINDS);
         if (!kind) throw invalidArgument(`kind is required and must be one of: ${ENQUEUE_KINDS.join(', ')}`);
         const repo = requiredRepoPath(args, 'repo');
@@ -252,6 +266,9 @@ function buildWriteTools(deps) {
         const model = args.model === undefined || args.model === null
           ? 'auto'
           : requiredString(args, 'model', { max: 128 });
+        if (kind !== 'spec' && (args.title !== undefined || args.body !== undefined)) {
+          throw invalidArgument('title and body are only valid for kind "spec"');
+        }
 
         /** @type {Record<string, any>} */
         const task = {
@@ -289,6 +306,17 @@ function buildWriteTools(deps) {
         }
 
         if (issue !== undefined) throw invalidArgument('issue is only valid for kind "github_issue"');
+
+        if (kind === 'spec') {
+          if (args.prompt !== undefined && args.prompt !== null) {
+            throw invalidArgument('prompt is not allowed for kind "spec": give title and body');
+          }
+          const title = requiredString(args, 'title', { max: MAX_SPEC_TITLE_CHARS });
+          const body = requiredString(args, 'body', { max: MAX_SPEC_BODY_CHARS });
+          task.prompt = JSON.stringify(createInlineTaskInput(title, body));
+          return respond(deps.createTask(task));
+        }
+
         task.prompt = requiredString(args, 'prompt', { max: 100000 });
         return respond(deps.createTask(task));
       },
@@ -534,7 +562,7 @@ function buildWriteTools(deps) {
         if (!model) {
           throw new Error(`task ${id} has no recorded model: nothing to attribute the review to`);
         }
-        const tier = requestedTier ?? chosen.tier ?? DEFAULT_REVIEW_TIER;
+        const tier = requestedTier ?? chosen.tier ?? storedTier(task) ?? DEFAULT_REVIEW_TIER;
 
         const review = deps.addReview({
           model,
@@ -595,6 +623,8 @@ module.exports = {
   ENQUEUE_KINDS,
   COMPLETE_STATUSES,
   MAX_SUMMARY_CHARS,
+  MAX_SPEC_TITLE_CHARS,
+  MAX_SPEC_BODY_CHARS,
   MAX_DEPENDS_ON,
   CLAIM_EXCLUDED_KINDS,
   CLAIM_TRUST_LEVELS,

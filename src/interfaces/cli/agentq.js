@@ -53,7 +53,7 @@ const SAVED_WORKFLOWS_DIR = path.join(os.homedir(), '.pi', 'workflows', 'saved')
 
 function usage() {
   return `Usage:
-  node bin/agentq.js [global opts] enqueue --repo PATH --issue N [--model MODEL] [--base BRANCH] [--depends-on ID[,ID...]] [--trusted] [--json]
+  node bin/agentq.js [global opts] enqueue --repo PATH (--issue N | --spec FILE) [--model MODEL] [--tier T] [--base BRANCH] [--depends-on ID[,ID...]] [--trusted] [--json]
   node bin/agentq.js [global opts] run-next [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
   node bin/agentq.js [global opts] run --id ID [--model MODEL|auto] [--tier T] [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
   node bin/agentq.js [global opts] drain [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
@@ -75,10 +75,18 @@ function usage() {
   node bin/agentq.js [global opts] jules-sessions [--json]
   node bin/agentq.js home [init [--force]]
 
+  Task sources:
+    --issue N pins a GitHub issue snapshot (captured with gh at enqueue time).
+    --spec FILE pins a local Markdown specification: the first "# " heading is
+    the title (else the file name) and the whole file is the body. Exactly one
+    of --issue or --spec is required. --tier is stored in routing_policy so a
+    later dispatch, the model-chosen event and review_task agree on it.
+
   Executor selection:
-    The runnable's harness picks the executor (pi -> pi-issue.sh,
-    claude -> claude-issue.sh). --executor overrides it; --workflow,
-    feedback jobs and --cua stay pi-only.
+    The runnable's harness picks the executor (pi -> pi-task.sh,
+    claude -> claude-task.sh). --executor overrides it; --workflow,
+    feedback jobs and --cua stay pi-only. A spec task runs on pi-task.sh
+    unless --executor or the task's stored executor says otherwise.
 
   run --id:
     Claims exactly that task (id or unique prefix) instead of the next one, so
@@ -91,7 +99,7 @@ function usage() {
     orchestrator worker applies); the claimed event keeps the replaced model.
 
   Workflow options:
-    --workflow               Use pi-dynamic-workflows executor instead of pi-issue.sh
+    --workflow               Use pi-dynamic-workflows executor instead of pi-task.sh
     --workflow-name NAME     Run a saved workflow from ~/.pi/workflows/saved/
 
   Auto-routing options:
@@ -130,7 +138,7 @@ function usage() {
     --no-quota-refresh       Do not refresh stale quota before an auto-model
                              decision (also AGENTQ_QUOTA_REFRESH=0)
     --auth-token TOKEN       bearer token for orchestrator API
-    --kind KIND              orchestrator task kind (default: github_issue)
+    --kind KIND              task kind: github_issue, spec or feedback (default: github_issue)
 
   Task ids are UUIDs: --id and --depends-on accept a full id or a unique
   prefix of at least 6 characters.
@@ -138,7 +146,7 @@ function usage() {
   A legacy JSONL log is not a queue any more. Import it once:
     agentq --db <home>/data/orchestrator.sqlite import-log --log <home>/data/agentq.log
 
-  Issue jobs default to untrusted (require --trusted to execute bare).
+  Issue and spec jobs default to untrusted (require --trusted to execute bare).
   Feedback jobs are always untrusted and require --sandbox, --cua, or an explicit override.
   --cua runs feedback in a fresh network-isolated local QEMU VM; it cannot run issue jobs.
 `;
@@ -181,6 +189,7 @@ function parseArgs(argv) {
     if (flag === '--json') options.json = true;
     else if (flag === '--repo') options.repo = needValue(args, flag);
     else if (flag === '--issue') options.issue = needValue(args, flag);
+    else if (flag === '--spec') options.spec = needValue(args, flag);
     else if (flag === '--id') options.id = needValue(args, flag);
     else if (flag === '--model') options.model = needValue(args, flag);
     else if (flag === '--task') options.task = needValue(args, flag);
@@ -482,7 +491,7 @@ function print(result, json) {
       return;
     }
     for (const job of result) {
-      const subject = job.issue_number != null ? `issue ${job.issue_number}` : (job.kind || 'task');
+      const subject = job.subject ?? (job.issue_number != null ? `issue ${job.issue_number}` : (job.kind || 'task'));
       process.stdout.write(`#${job.id} ${job.status.padEnd(9)} ${subject} ${job.model ?? '(unset)'} ${job.branch || ''}\n`);
     }
     return;
@@ -818,7 +827,7 @@ async function main(argv = process.argv.slice(2)) {
   if (options.threshold !== undefined && !Number.isFinite(options.threshold)) {
     throw new Error('--threshold must be a number');
   }
-  if (!['github_issue', 'feedback'].includes(global.kind)) {
+  if (!['github_issue', 'spec', 'feedback'].includes(global.kind)) {
     throw new Error(`unsupported task kind: ${global.kind}`);
   }
   const runCommands = ['run-next', 'drain', 'run'];
@@ -832,6 +841,15 @@ async function main(argv = process.argv.slice(2)) {
     }
     if (!options.sandbox && !options.cua && !options.allowUntrusted) {
       throw new Error('feedback workers require --sandbox, --cua, or the explicit --allow-untrusted override');
+    }
+  }
+  if (command === 'enqueue') {
+    const hasSpec = options.spec !== undefined && options.spec !== '';
+    const hasIssue = options.issue !== undefined && options.issue !== '';
+    if (hasSpec === hasIssue) {
+      throw new Error(hasSpec
+        ? 'enqueue accepts exactly one of --issue or --spec, not both'
+        : 'enqueue requires --issue N or --spec FILE');
     }
   }
   if (command === 'run') {

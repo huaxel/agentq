@@ -34,6 +34,28 @@ function normalizeTier(tier) {
 }
 
 /**
+ * The tier a task was enqueued with, from `routing_policy` (`{ tier }`).
+ *
+ * The queue stores the requested tier there so every consumer agrees on it:
+ * dispatch, the `model-chosen` event, `review_task` and the local claim paths
+ * all resolve through this one helper. Unreadable, absent or unknown policy
+ * contributes nothing.
+ *
+ * @param {{ routing_policy?: unknown }|null|undefined} task
+ * @returns {string|null}
+ */
+function storedTier(task) {
+  const raw = task?.routing_policy;
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.tier === 'string' && Object.hasOwn(TIER_FLOORS, parsed.tier) ? parsed.tier : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Compact "id: reason" list for humans and error messages. The last reason is
  * the disqualifying one, because routing appends the failing check last.
  *
@@ -131,4 +153,5 @@ module.exports = {
   summarizeRejections,
   noModelError,
   resolveAutoModel,
+  storedTier,
 };

@@ -22,11 +22,13 @@ const { randomUUID } = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
 const { OrchestratorWorker } = require('./worker.js');
 const { admit } = require('../core/admission.js');
-const { fetchIssueInput, issueInputFromPrompt, validateIssueJob } = require('../core/issue-input.js');
+const {
+  fetchTaskInput, readSpecFile, taskInputFromTask, taskSlug, validateTaskJob,
+} = require('../core/task-input.js');
 const { attributePath } = require('../lib/path-attribution.js');
 const { loadConfig } = require('../lib/model-picker.js');
 const { homeDataPath } = require('../lib/home.js');
-const { resolveAutoModel: resolveAutoModelFor } = require('../core/auto-model.js');
+const { resolveAutoModel: resolveAutoModelFor, storedTier } = require('../core/auto-model.js');
 const { loadPathHealth } = require('./path-health.js');
 const { loadTrackRecords } = require('./track-records.js');
 const {
@@ -57,6 +59,9 @@ const {
 } = require('./db.js');
 
 const ROOT = path.join(__dirname, '..', '..');
+
+/** Task kinds a plain pi/claude worker can run when named by id. */
+const PI_TASK_KINDS = Object.freeze(['github_issue', 'spec']);
 
 // --- Queue database ---
 
@@ -99,6 +104,47 @@ function openQueueDb(dbPath) {
 }
 
 /**
+ * How a task's pinned input is named in the CLI: `issue 42` or
+ * `spec: Title (/abs/file.md)`.
+ *
+ * @param {Record<string, any>|null} taskInput
+ * @returns {string|null}
+ */
+function taskSubject(taskInput) {
+  if (!taskInput) return null;
+  if (taskInput.source === 'github') return `issue ${taskInput.ref}`;
+  return `spec: ${taskInput.title} (${taskInput.source === 'file' ? taskInput.ref : 'inline'})`;
+}
+
+/**
+ * Resolve what an enqueue request is for.
+ *
+ * Exactly one of `--issue` or `--spec` is required. A spec is read now, at
+ * enqueue time, so later edits cannot change what runs; a failed read creates
+ * nothing.
+ *
+ * @param {Record<string, any>} options
+ * @param {string} repo resolved repository path
+ * @param {Function} [issueRunner] injected `gh` runner (tests)
+ * @returns {{ kind: string, issue: number|null, taskInput: Record<string, any> }}
+ */
+function enqueueInput(options, repo, issueRunner) {
+  const hasSpec = typeof options.spec === 'string' && options.spec.trim() !== '';
+  const hasIssue = options.issue !== undefined && options.issue !== null && options.issue !== '';
+  if (hasSpec === hasIssue) {
+    throw new Error(hasSpec
+      ? 'enqueue accepts exactly one of --issue or --spec, not both'
+      : 'enqueue requires --issue N or --spec FILE');
+  }
+  if (hasSpec) return { kind: 'spec', issue: null, taskInput: readSpecFile(options.spec) };
+  const issue = Number(options.issue);
+  if (!/^[0-9]+$/.test(String(options.issue)) || !Number.isSafeInteger(issue) || issue <= 0) {
+    throw new Error(`Invalid --issue: ${options.issue}`);
+  }
+  return { kind: 'github_issue', issue, taskInput: fetchTaskInput(repo, issue, { run: issueRunner }) };
+}
+
+/**
  * Present a task row in the shape the executor, CLI and menu already use.
  *
  * Completion data (exit code, worktree, branch, usage, verification) lives in
@@ -108,13 +154,15 @@ function taskToJob(task) {
   let result = null;
   try { result = task.result ? JSON.parse(task.result) : null; } catch { result = null; }
   const completion = result && typeof result === 'object' ? result : {};
+  const taskInput = taskInputFromTask(task);
   return {
     id: task.id,
     kind: task.kind || 'github_issue',
     source: task.source || null,
     repo_path: task.repo || null,
     issue_number: task.issue_num ?? null,
-    issue_input: issueInputFromPrompt(task.prompt, task.issue_num),
+    task_input: taskInput,
+    subject: taskSubject(taskInput),
     prompt: typeof task.prompt === 'string' ? task.prompt : null,
     model: task.model || null,
     provider: task.provider || null,
@@ -185,7 +233,7 @@ function pidAlive(pid) {
 // not, so every unprovable case falls through to a skip.
 /**
  * Ownership proof for the STANDALONE (executor-created) resources reported by
- * executor labels. pi-issue.sh and pi-workflow.sh allocate
+ * executor labels. pi-task.sh and pi-workflow.sh allocate
  * `$(mktemp -d)/pi-issue-<issue>` with branch `pi/issue-<issue>` — the random
  * mkdtemp parent is unknowable in advance, so the contract is bound by TMPDIR
  * scope + exact basename. A forged label pair can only ever name these
@@ -194,20 +242,34 @@ function pidAlive(pid) {
  * checkout must be the contract branch (a contract-named worktree checked out
  * on anything else is not provably this job's — delete nothing).
  */
-function standaloneContract(issueNumber) {
-  return { branch: `pi/issue-${issueNumber}`, worktreeBasename: `pi-issue-${issueNumber}` };
+function standaloneContract(job) {
+  const input = job?.task_input ?? null;
+  if (input) {
+    // The same slug the executor derives from the pinned input: a GitHub task
+    // keeps `pi-issue-<n>` / `pi/issue-<n>`, a spec gets `pi-task-<slug>` /
+    // `pi/task-<slug>`.
+    const slug = taskSlug(input);
+    return { branch: `pi/${slug}`, worktreeBasename: `pi-${slug}` };
+  }
+  if (job?.issue_number != null) {
+    return { branch: `pi/issue-${job.issue_number}`, worktreeBasename: `pi-issue-${job.issue_number}` };
+  }
+  return null;
 }
 
-function isContractWorktreePath(worktreePath, issueNumber) {
-  if (issueNumber == null) return false;
+function isContractWorktreePath(worktreePath, job) {
+  const contract = standaloneContract(job);
+  if (!contract) return false;
   const resolved = canonicalizePath(worktreePath);
   const tmp = canonicalizePath(os.tmpdir());
   if (!resolved || !tmp || !resolved.startsWith(tmp + path.sep)) return false;
-  return path.basename(resolved) === standaloneContract(issueNumber).worktreeBasename;
+  return path.basename(resolved) === contract.worktreeBasename;
 }
 
-function standaloneOwnership(repoPath, worktreePath, branchLabel, issueNumber) {
-  const contractBranch = standaloneContract(issueNumber).branch;
+function standaloneOwnership(repoPath, worktreePath, branchLabel, job) {
+  const contract = standaloneContract(job);
+  if (!contract) return { owned: false };
+  const contractBranch = contract.branch;
   if (branchLabel != null && branchLabel !== contractBranch) return { owned: false };
   const resolved = canonicalizePath(worktreePath);
   if (!resolved) return { owned: false };
@@ -452,29 +514,28 @@ class SqliteSource {
 
   async enqueue(options = {}) {
     if (!options.repo) throw new Error('enqueue requires --repo');
-    if (!options.issue) throw new Error('enqueue requires --issue');
     const repo = path.resolve(options.repo);
     if (!fs.existsSync(repo)) throw new Error(`Repo path does not exist: ${repo}`);
-    const issue = Number(options.issue);
-    if (!/^[0-9]+$/.test(String(options.issue)) || !Number.isSafeInteger(issue) || issue <= 0) throw new Error(`Invalid --issue: ${options.issue}`);
 
     const model = options.model || 'auto';
     const base = options.base || currentBranch(repo);
     // --untrusted takes precedence (explicit opt-out), then --trusted.
     const trusted = !options.untrusted && !!options.trusted;
     const deps = parseDependencyIds(options.dependsOn).map((dep) => resolveTaskId(this.db, dep));
-    // Fetch before creating the task: network latency must not leave a
-    // half-created job behind, and a failed capture creates nothing.
-    const issueInput = fetchIssueInput(repo, issue, { run: this.issueRunner });
     const config = loadConfig();
+    // Capture before creating the task: a failed gh call or spec read must not
+    // leave a half-created job behind, and a bad dependency id must not spend
+    // a capture first.
+    const { kind, issue, taskInput } = enqueueInput(options, repo, this.issueRunner);
 
     const task = createTask(this.db, {
-      kind: 'github_issue',
+      kind,
       source: 'cli',
       repo,
       issue_num: issue,
       base_branch: base,
-      prompt: JSON.stringify(issueInput),
+      prompt: JSON.stringify(taskInput),
+      routing_policy: options.tier ? { tier: options.tier } : null,
       model,
       provider: model === 'auto' ? null : attributePath(config, model).pathId,
       executor: options.executor ? path.resolve(options.executor) : null,
@@ -559,9 +620,16 @@ class SqliteSource {
     // per-candidate queue read would scale with the backlog. A caller that
     // already read them (the CLI) passes its own map.
     const trackRecords = options.trackRecords ?? loadTrackRecords(this.db);
-    const resolve = (storedModel) => {
+    const resolve = (storedModel, candidate) => {
       try {
-        return resolveAutoModelFor(storedModel, { ...options, pathHealth: health, trackRecords });
+        return resolveAutoModelFor(storedModel, {
+          ...options,
+          // A task enqueued with --tier routes at that tier even when this
+          // drain did not pass one; an explicit --tier still wins.
+          tier: options.tier ?? storedTier(candidate),
+          pathHealth: health,
+          trackRecords,
+        });
       } catch (error) {
         routingError ??= error;
         throw error; // claimNextTask skips this candidate
@@ -625,7 +693,12 @@ class SqliteSource {
     // --kind feedback (and its sandbox/CUA boundary), which is a different
     // worker configuration entirely.
     const workerKind = options.kind || this.kind || 'github_issue';
-    if (task.kind !== workerKind) {
+    // `github_issue` and `spec` are the same executor family: both are plain
+    // pi/claude tasks with the same admission gate and pinned input. Naming one
+    // by id is explicit, so a default worker may run either. Feedback stays a
+    // different worker configuration (it needs a sandbox/CUA boundary).
+    const sameFamily = PI_TASK_KINDS.includes(task.kind) && PI_TASK_KINDS.includes(workerKind);
+    if (task.kind !== workerKind && !sameFamily) {
       this.refused = [{
         id,
         reason: `Task #${id} is kind '${task.kind}', but this worker runs '${workerKind}'. `
@@ -639,7 +712,9 @@ class SqliteSource {
     // is resolved now so admission (and the audit row) sees the concrete model.
     const requested = typeof options.model === 'string' && options.model.trim() ? options.model : null;
     const resolved = resolveAutoModelFor(requested ?? job.model, {
-      tier: options.tier,
+      // A named task routes for the tier it was enqueued with unless this run
+      // asks for another one; the same tier review_task records later.
+      tier: options.tier ?? storedTier(task),
       quotaPath: options.quota,
       roiOutputPath: options.roiOutputPath,
       runnablesPath: options.runnablesPath,
@@ -704,7 +779,7 @@ class SqliteSource {
       job.depends_on = deps.map((dep) => dep.id);
       let inputError = null;
       if (job.status === 'pending') {
-        try { validateIssueJob(job); } catch (error) { inputError = error.message; }
+        try { validateTaskJob(job); } catch (error) { inputError = error.message; }
       }
       const blocked = job.status === 'pending'
         && (inputError || deps.some((dep) => dep.status !== 'succeeded'));
@@ -822,7 +897,7 @@ class SqliteSource {
 
       if (job.worktree_path && job.worktree_path !== worktree) {
         const piWt = job.worktree_path;
-        if (!isContractWorktreePath(piWt, job.issue_number)) {
+        if (!isContractWorktreePath(piWt, job)) {
           // Outside this job's standalone contract (pi-issue-<issue> under
           // TMPDIR): not provably this job's resource — never delete it.
           jobSkipped.push({ id: job.id, path: piWt, reason: 'worktree label outside the standalone contract; left for manual cleanup' });
@@ -834,7 +909,7 @@ class SqliteSource {
           // still-present worktree checkout. A contract-named worktree whose
           // checkout is not the contract branch is not provably this job's:
           // delete NEITHER resource.
-          const own = standaloneOwnership(job.repo_path, piWt, job.branch, job.issue_number);
+          const own = standaloneOwnership(job.repo_path, piWt, job.branch, job);
           if (!own.owned) {
             jobSkipped.push({ id: job.id, path: piWt, reason: 'standalone worktree not verified as job-owned; left for manual cleanup' });
             if (job.branch) {
@@ -922,15 +997,18 @@ class SqliteSource {
    */
   async claimRetry(job, { completionId, retryCount, options = {} } = {}) {
     if (!completionId) throw new Error(`Cannot retry job #${job.id} without a completion receipt.`);
-    // Resolve before touching the queue: a routing failure must not leave the
-    // task re-pended with nobody running it.
+    // Read the row first: the retry routes at the tier the task was enqueued
+    // with unless this run asks for another one. Resolving before any write
+    // still keeps a routing failure from re-pending the task with nobody to
+    // run it.
+    const task = getTask(this.db, job.id);
+    if (!task) return null;
     const resolved = resolveAutoModelFor(job.model, {
       ...options,
+      tier: options.tier ?? storedTier(task),
       pathHealth: loadPathHealth(this.db),
       trackRecords: loadTrackRecords(this.db),
     });
-    const task = getTask(this.db, job.id);
-    if (!task) return null;
     // Same rule as claimById/requeue: re-attribute the path only when the
     // model actually changes. Passing `model` unconditionally used to clear a
     // stored provider on every retry (resolved.provider is null for an
@@ -981,12 +1059,14 @@ class SqliteSource {
 // --- Orchestrator worker queue source ---
 
 function normalizeTask(task) {
+  const taskInput = taskInputFromTask(task);
   return {
     id: task.id,
     kind: task.kind || 'github_issue',
     repo_path: task.repo || null,
     issue_number: task.issue_num || null,
-    issue_input: issueInputFromPrompt(task.prompt, task.issue_num),
+    task_input: taskInput,
+    subject: taskSubject(taskInput),
     prompt: typeof task.prompt === 'string' ? task.prompt : null,
     model: task.model || null,
     provider: task.provider || null,
@@ -1060,11 +1140,9 @@ class OrchestratorSource {
 
   async enqueue(options = {}) {
     if (!options.repo) throw new Error('enqueue requires --repo');
-    if (!options.issue) throw new Error('enqueue requires --issue');
     const repo = path.resolve(options.repo);
     if (!fs.existsSync(repo)) throw new Error(`Repo path does not exist: ${repo}`);
-    const issue = Number(options.issue);
-    if (!/^[0-9]+$/.test(String(options.issue)) || !Number.isSafeInteger(issue) || issue <= 0) throw new Error(`Invalid --issue: ${options.issue}`);
+    const { kind, issue, taskInput } = enqueueInput(options, repo, this.issueRunner);
 
     const model = options.model || 'auto';
     const base = options.base || currentBranch(repo);
@@ -1072,16 +1150,16 @@ class OrchestratorSource {
     const trustLevel = trusted ? 'trusted_agent' : 'agent';
     const config = loadConfig();
     const provider = model === 'auto' ? null : attributePath(config, model).pathId;
-    const issueInput = fetchIssueInput(repo, issue, { run: this.issueRunner });
 
     const task = await this.worker.enqueue({
-      kind: 'github_issue',
+      kind,
       repo,
       issue_num: issue,
       base_branch: base,
       model,
       provider,
-      prompt: JSON.stringify(issueInput),
+      routing_policy: options.tier ? { tier: options.tier } : null,
+      prompt: JSON.stringify(taskInput),
       executor: options.executor ? path.resolve(options.executor) : null,
       trust_level: trustLevel,
       approval_required: trusted ? 0 : 1,

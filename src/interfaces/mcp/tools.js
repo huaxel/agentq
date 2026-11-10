@@ -492,7 +492,7 @@ function buildReadTools(deps) {
           kind: {
             type: 'string',
             maxLength: 64,
-            description: 'Filter by task kind, for example "github_issue" or "prompt".',
+            description: 'Filter by task kind, for example "github_issue", "spec" or "prompt".',
           },
           limit: {
             type: 'integer',

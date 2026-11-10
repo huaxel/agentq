@@ -11,7 +11,8 @@
  * one of them eventually leaks.
  */
 
-const { issueInputFromPrompt } = require('../../core/issue-input.js');
+const { TYPE: ISSUE_INPUT_TYPE } = require('../../core/issue-input.js');
+const { TYPE: TASK_INPUT_TYPE, taskInputFromTask } = require('../../core/task-input.js');
 
 /** Task statuses the orchestrator lifecycle can persist. */
 const TASK_STATUSES = ['pending', 'running', 'succeeded', 'failed', 'unverified', 'rejected'];
@@ -149,8 +150,10 @@ function summarizeTask(task) {
 }
 
 /**
- * Pinned GitHub issue snapshot, when the prompt column holds one. Returns
- * null for plain prompts and for anything that does not parse.
+ * Pinned GitHub issue snapshot, when the prompt column holds one. Accepts the
+ * generic task input and the legacy issue snapshot it was migrated from.
+ * Returns null for plain prompts, non-GitHub sources and anything that does
+ * not parse. This is a display projection, not a validation gate.
  * @param {unknown} prompt
  * @returns {Record<string, any> | null}
  */
@@ -163,9 +166,20 @@ function parseIssueInput(prompt) {
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== 'object' || parsed.type !== 'agentq.github-issue-input' || !parsed.issue) {
-    return null;
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (parsed.type === TASK_INPUT_TYPE) {
+    if (parsed.source !== 'github') return null;
+    return {
+      number: Number(parsed.ref) || null,
+      title: textOrNull(parsed.title),
+      body: textOrNull(parsed.body),
+      url: textOrNull(parsed.url),
+      updated_at: null,
+      captured_at: textOrNull(parsed.capturedAt),
+      sha256: textOrNull(parsed.sha256),
+    };
   }
+  if (parsed.type !== ISSUE_INPUT_TYPE || !parsed.issue) return null;
   const issue = parsed.issue;
   return {
     number: issue.number ?? null,
@@ -260,7 +274,7 @@ function admissionJob(row) {
     prompt: row.prompt,
     model: row.model,
     issue_number: row.issue_num ?? null,
-    issue_input: issueInputFromPrompt(row.prompt, row.issue_num),
+    task_input: taskInputFromTask(row),
     trusted: row.trust_level === 'trusted_agent' ? 1 : 0,
   };
 }

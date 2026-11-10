@@ -313,6 +313,22 @@ test('dispatch_task routes when the task has no pinned model or asks for auto', 
   assert.deepEqual(explicitAuto.calls.recommend.at(-1), { tier: 'medium' });
 });
 
+test('dispatch_task defaults the tier to the one stored at enqueue', () => {
+  const stored = fakeDeps({
+    getTask: () => trustedTask({ model: 'auto', routing_policy: JSON.stringify({ tier: 'big' }) }),
+  });
+  tool('dispatch_task', stored.deps).handler({ id: 't1' });
+  assert.deepEqual(stored.calls.recommend, [{ tier: 'big' }]);
+  assert.equal(stored.calls.events.find((entry) => entry.event === 'model-chosen').payload.tier, 'big');
+
+  // An explicit argument still wins over the stored policy.
+  const explicit = fakeDeps({
+    getTask: () => trustedTask({ model: 'auto', routing_policy: JSON.stringify({ tier: 'big' }) }),
+  });
+  tool('dispatch_task', explicit.deps).handler({ id: 't1', tier: 'small' });
+  assert.deepEqual(explicit.calls.recommend, [{ tier: 'small' }]);
+});
+
 test('dispatch_task refuses "auto" when routing finds no eligible model, with reasons', () => {
   const { deps } = fakeDeps({
     getTask: () => trustedTask({ model: 'auto' }),

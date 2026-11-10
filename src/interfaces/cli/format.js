@@ -293,9 +293,12 @@ function formatJobBlock(job) {
   const repo = truncateRepo(job.repo_path);
   const verify = job.verified === 1 ? ' ✓ verified' : job.verified === 0 ? ' ✗ tests failed' : '';
   const exitInfo = job.exit_code != null && job.exit_code !== 0 ? ` · exit=${job.exit_code}` : '';
+  const subject = job.task_input && job.task_input.source !== 'github'
+    ? job.subject
+    : `${repo}#${job.issue_number}`;
   const lines = [
     `#${job.id}  ${job.status}${verify}${exitInfo}`,
-    `    ${repo}#${job.issue_number}  ·  ${job.model}`,
+    `    ${subject}  ·  ${job.model}`,
   ];
   if (job.input_error) lines.push(`    input: ${job.input_error}`);
   if (job.branch) lines.push(`    branch: ${job.branch}`);

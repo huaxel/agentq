@@ -23,7 +23,7 @@ const path = require('node:path');
 const { spawnSync, spawn, execFileSync } = require('node:child_process');
 const { captureGitSnapshot } = require('./verification-evidence.js');
 const { RESULT_FILE_ENV, createResultPath, readResultFile } = require('./result-file.js');
-const { validateIssueInput } = require('../core/issue-input.js');
+const { validateTaskJob } = require('../core/task-input.js');
 const { admit } = require('../core/admission.js');
 const { loadRunnables, harnessForModel } = require('../core/catalog.js');
 const {
@@ -38,8 +38,8 @@ const { classifyOutcome } = require('../core/path-health.js');
 const { loadConfig } = require('../lib/model-picker.js');
 
 const ROOT = path.join(__dirname, '..', '..');
-const DEFAULT_EXECUTOR = path.join(ROOT, 'pi-issue.sh');
-const CLAUDE_EXECUTOR = path.join(ROOT, 'claude-issue.sh');
+const DEFAULT_EXECUTOR = path.join(ROOT, 'pi-task.sh');
+const CLAUDE_EXECUTOR = path.join(ROOT, 'claude-task.sh');
 const WORKFLOW_EXECUTOR = path.join(ROOT, 'pi-workflow.sh');
 const CUA_FEEDBACK_EXECUTOR = path.join(ROOT, 'src', 'runners', 'cua-feedback.js');
 // Harnesses agentq can launch. A runnable that names anything else is a
@@ -148,7 +148,7 @@ function resolveExecutor(job, options = {}) {
         'Enqueue the task with a pi-harness model.',
     );
   }
-  // Workflow mode: use pi-workflow.sh instead of pi-issue.sh
+  // Workflow mode: use pi-workflow.sh instead of pi-task.sh
   if (options?.workflow || job?.workflow) {
     if (harness === 'claude') {
       throw new Error(`--workflow is pi-only; model ${model} uses the claude harness.`);
@@ -294,7 +294,7 @@ function runAsync(command, args, {
 //   - the job's work area (log root: worktrees/, logs, db — operator-managed
 //     scratch space; sibling job worktrees live here too, and branch deletion
 //     is separately gated by jobBranchIsJobOwned() at prune time), or
-//   - a `pi-*` dir under TMPDIR (pi-issue.sh standalone creates
+//   - a `pi-*` dir under TMPDIR (pi-task.sh standalone creates
 //     $(mktemp -d)/pi-<slug>; the pi- prefix is the documented contract).
 // Everything else — user dirs, other repos, other queues' data roots — is
 // dropped and the label falls back to runCwd. Resolve existing ancestors too,
@@ -399,6 +399,23 @@ function prepareJobWorktree(sink, job) {
   // Note: worktree/branch are not persisted here; the completion result records
   // them (the managed checkout, or the executor's result file for a standalone
   // checkout).
+}
+
+/**
+ * The executor's first positional argument.
+ *
+ * A GitHub task keeps its issue number (the documented standalone contract);
+ * a spec task has none, so it passes its own id and the executor names the
+ * worktree from the pinned title.
+ *
+ * @param {Record<string, any>} job
+ * @param {Record<string, any>|null} [input] the validated pinned input
+ * @returns {string}
+ */
+function executorSubject(job, input = job.task_input ?? null) {
+  if (input && input.source === 'github') return String(input.ref);
+  if (input) return String(job.id);
+  return String(job.issue_number);
 }
 
 async function executeJob(job, options, source, { preclaimedModel = null } = {}) {
@@ -520,9 +537,15 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
     console.error(`job ${job.id}: ${error.message}`);
     return { id: job.id, status: 'failed', exitCode: 1, refusal: error.message };
   }
+  // The pinned input is validated once, before the claim, and drives both the
+  // executor argument and the stdin payload. The executor's first argument
+  // names the task: the issue number for a GitHub task (its standalone
+  // contract), the task id for a spec task (the executor derives its worktree
+  // slug from the pinned title).
+  const taskInput = job.kind === 'feedback' ? null : validateTaskJob(job);
   const execArgs = job.kind === 'feedback'
     ? [String(job.id), model]
-    : [String(job.issue_number), model, ...(job.issue_input ? ['--agentq-pinned-input'] : [])];
+    : [executorSubject(job, taskInput), model, ...(taskInput ? ['--agentq-pinned-input'] : [])];
   let command = executor;
   let args = execArgs;
   if (options.sandbox) {
@@ -556,11 +579,9 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
     };
     delete env.AGENTQ_PINNED_INPUT;
     delete env.AGENTQ_INPUT_SHA256;
-    const issueInput = job.kind !== 'feedback' && job.issue_input
-      ? validateIssueInput(job.issue_input, job.issue_number) : null;
-    if (issueInput) {
+    if (taskInput) {
       env.AGENTQ_PINNED_INPUT = '1';
-      env.AGENTQ_INPUT_SHA256 = issueInput.sha256;
+      env.AGENTQ_INPUT_SHA256 = taskInput.sha256;
     }
     if (options.cua && options.verify) env.AGENTQ_VERIFY_COMMAND = options.verify;
     if (options.stopWhen) env.AGENTQ_STOP_WHEN = options.stopWhen;
@@ -575,9 +596,9 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
       statePath: sink.statePath,
       jobId: job.id,
       outputPath: logPathJob,
-      input: job.kind === 'feedback' ? job.prompt : (issueInput ? JSON.stringify(issueInput) : undefined),
+      input: job.kind === 'feedback' ? job.prompt : (taskInput ? JSON.stringify(taskInput) : undefined),
       appendOutput: true,
-      outputPrefix: `\n--- attempt ${attemptId} ---\n${JSON.stringify({ jobId: job.id, model, input_sha256: issueInput?.sha256, startedAt: nowIso() })}\n`,
+      outputPrefix: `\n--- attempt ${attemptId} ---\n${JSON.stringify({ jobId: job.id, model, input_sha256: taskInput?.sha256, startedAt: nowIso() })}\n`,
     });
 
     if (result.timedOut) {
@@ -683,7 +704,7 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
     try { fs.fsyncSync(logFd); } finally { fs.closeSync(logFd); }
     const completion = await sink.finish(job, {
       attemptId,
-      inputSha256: issueInput?.sha256,
+      inputSha256: taskInput?.sha256,
       status: nextStatus,
       exit: exitCode,
       worktree,
@@ -737,6 +758,7 @@ module.exports = {
   CUA_FEEDBACK_EXECUTOR,
   CLAUDE_EXECUTOR,
   EXECUTABLE_HARNESSES,
+  executorSubject,
   nowIso,
   attemptPathFor,
   recordAttemptOutcome,

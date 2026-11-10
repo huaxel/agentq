@@ -19,6 +19,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULT_WRITER="${SCRIPT_DIR}/src/runners/result-file.js"
+INPUT_READER="${SCRIPT_DIR}/src/runners/executor-input.js"
 
 usage() {
   echo "usage: pi-workflow.sh <issue-number> <provider/model> [workflow-name]" >&2
@@ -60,37 +61,30 @@ branch="${AGENTQ_BRANCH:-$(git -C "$wt" branch --show-current 2>/dev/null || ech
 
 if [ "${AGENTQ_PINNED_INPUT:-}" = 1 ]; then
   echo "▶ issue #${ISSUE} — using pinned enqueue input"
-  issue_input="$(cat)"
+  task_input="$(cat)"
 elif [ -n "${AGENTQ_JOB_ID:-}" ]; then
   echo "Queued issue execution requires pinned input; enqueue a new job." >&2
   exit 1
 else
   echo "▶ issue #${ISSUE} — fetching standalone input via gh"
-  issue_input="$(gh issue view "$ISSUE" --json number,title,body,url,updatedAt)"
+  task_input="$(gh issue view "$ISSUE" --json number,title,body,url,updatedAt)"
 fi
 # NUL-delimited fields preserve trailing newlines without shell evaluation.
+# The reader owns the digest check and the legacy-to-generic conversion.
 {
+  IFS= read -r -d '' input_source
+  IFS= read -r -d '' ref
   IFS= read -r -d '' title
   IFS= read -r -d '' body
-} < <(printf '%s' "$issue_input" | node -e '
-  try {
-    const data = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-    const pinned = process.env.AGENTQ_PINNED_INPUT === "1";
-    if (pinned) {
-      const { sha256, ...payload } = data;
-      const digest = require("node:crypto").createHash("sha256").update("agentq-issue-input-v1\0").update(JSON.stringify(payload)).digest("hex");
-      if (data.type !== "agentq.github-issue-input" || data.version !== 1 || digest !== sha256 || sha256 !== process.env.AGENTQ_INPUT_SHA256) throw new Error();
-    }
-    const issue = pinned ? data.issue : data;
-    if (issue.number !== Number(process.argv[1]) || !issue.title
-      || [issue.title, issue.body].some(value => typeof value !== "string" || value.includes("\0") || Buffer.from(value).toString("utf8") !== value)) throw new Error();
-    process.stdout.write(issue.title + "\0" + issue.body + "\0");
-  } catch {
-    console.error("Invalid issue input; enqueue a new job rather than fetching replacement text.");
-    process.exitCode = 1;
-  }
-' "$ISSUE")
-unset issue_input
+  IFS= read -r -d '' slug
+} < <(printf '%s' "$task_input" | node "$INPUT_READER" "$ISSUE")
+unset task_input
+# The generated workflow embeds GitHub issue framing; a spec task has no issue
+# to open a PR against, so it is refused rather than mislabelled.
+if [ "${input_source:-}" != github ] || [ "${ref:-}" != "$ISSUE" ]; then
+  echo "pi-workflow.sh runs GitHub issue tasks only (got source '${input_source:-none}')." >&2
+  exit 1
+fi
 
 # Issue text is embedded into a generated JS workflow below. It MUST be
 # JSON-encoded (not ${var@Q}, which emits shell quoting that is invalid

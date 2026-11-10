@@ -143,7 +143,95 @@ test('a local CLI job is visible through listTasks (one shared store)', () => {
     assert.equal(rows[0].status, 'pending');
     assert.equal(rows[0].trust_level, 'trusted_agent');
     assert.equal(rows[0].approval_required, 0);
-    assert.ok(rows[0].prompt.includes('"agentq.github-issue-input"'));
+    assert.ok(rows[0].prompt.includes('"agentq.task-input/v1"'));
+  } finally {
+    handle.close();
+  }
+});
+
+test('enqueue --spec stores a spec task with the requested tier', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const spec = path.join(root, 'spec.md');
+  fs.writeFileSync(spec, '# Local spec\n\nDo the work.\n');
+
+  const enqueued = run([
+    '--db', db,
+    'enqueue',
+    '--repo', repo,
+    '--spec', spec,
+    '--model', 'test/model',
+    '--tier', 'big',
+    '--base', 'master',
+    '--trusted',
+    '--json',
+  ]);
+  assert.equal(enqueued.exitCode, 0, enqueued.stderr);
+  const { id, status } = JSON.parse(enqueued.stdout);
+  assert.equal(status, 'pending');
+
+  const handle = openDb(db);
+  try {
+    const row = dbModule.getTask(handle, id);
+    assert.equal(row.kind, 'spec');
+    assert.equal(row.issue_num, null);
+    assert.deepEqual(JSON.parse(row.routing_policy), { tier: 'big' });
+    const pinned = JSON.parse(row.prompt);
+    assert.equal(pinned.type, 'agentq.task-input/v1');
+    assert.equal(pinned.source, 'file');
+    assert.equal(pinned.title, 'Local spec');
+    assert.equal(pinned.body, '# Local spec\n\nDo the work.\n');
+  } finally {
+    handle.close();
+  }
+
+  // status names the spec by title and file.
+  const listed = run(['--db', db, 'status']);
+  assert.equal(listed.exitCode, 0, listed.stderr);
+  assert.match(listed.stdout, new RegExp(`spec: Local spec \\(${path.resolve(spec).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`));
+});
+
+test('enqueue requires exactly one of --issue or --spec', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const spec = path.join(root, 'spec.md');
+  fs.writeFileSync(spec, '# Spec\n\nbody\n');
+
+  const both = run(['--db', db, 'enqueue', '--repo', repo, '--issue', '42', '--spec', spec, '--json']);
+  assert.equal(both.exitCode, 1);
+  assert.match(both.stderr, /exactly one of --issue or --spec/);
+
+  const neither = run(['--db', db, 'enqueue', '--repo', repo, '--json']);
+  assert.equal(neither.exitCode, 1);
+  assert.match(neither.stderr, /requires --issue N or --spec FILE/);
+
+  const freshDb = path.join(root, 'fresh.sqlite');
+  const missing = run(['--db', freshDb, 'enqueue', '--repo', repo, '--spec', path.join(root, 'absent.md'), '--json']);
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderr, /Spec file not found/);
+  const handle = openDb(freshDb);
+  try {
+    assert.equal(handle.prepare('SELECT count(*) AS count FROM tasks').get().count, 0, 'a refused spec enqueue creates no task');
+  } finally {
+    handle.close();
+  }
+});
+
+test('enqueue --spec names a NUL byte instead of the generic refusal', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const spec = path.join(root, 'nul.md');
+  fs.writeFileSync(spec, '# NUL spec\n\nbefore\0after\n');
+
+  const refused = run(['--db', db, 'enqueue', '--repo', repo, '--spec', spec, '--trusted', '--json']);
+  assert.equal(refused.exitCode, 1);
+  assert.match(refused.stderr, /Task body must not contain a NUL byte/);
+  const handle = openDb(db);
+  try {
+    assert.equal(handle.prepare('SELECT count(*) AS count FROM tasks').get().count, 0);
   } finally {
     handle.close();
   }
@@ -400,6 +488,47 @@ git -C "${repo}" worktree add -q -b pi/issue-${issueNumber} "${piWorktree}" mast
   }
 });
 
+test('prune cleans up standalone spec resources under the pi-task contract', () => {
+  const root = tmpdir();
+  const repo = makeGitRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const spec = path.join(root, 'prune-spec.md');
+  fs.writeFileSync(spec, '# Prune spec\n\nbody\n');
+  // pi-task.sh derives the standalone names from the spec: pi-task-<slug> and
+  // pi/task-<slug>. Prune must bind to the SAME names to clean them up.
+  const slug = 'task-prune-spec';
+  const piWorktree = path.join(os.tmpdir(), `pi-${slug}`);
+  try {
+    execFileSync('git', ['-C', repo, 'worktree', 'add', '-q', '-b', `pi/${slug}`, piWorktree, 'master']);
+
+    const executor = makeExecutor(root, `#!/usr/bin/env bash
+set -euo pipefail
+${emitResult(root, resultPayload())}
+`);
+    const { id } = JSON.parse(run(['--db', db, 'enqueue', '--repo', repo, '--spec', spec, '--model', 'm', '--base', 'master', '--trusted', '--json']).stdout);
+    run(['--db', db, '--kind', 'spec', 'run-next', '--executor', executor, '--json']);
+    // Reproduce a standalone completion: the executor reported its own
+    // worktree/branch instead of the agentq-managed checkout.
+    patchResult(db, id, { worktree: piWorktree, branch: `pi/${slug}` });
+
+    const [before] = jobs(db);
+    assert.equal(before.status, 'succeeded');
+    assert.equal(before.kind, 'spec');
+    assert.equal(before.worktree_path, piWorktree);
+
+    // The agentq-managed worktree is already gone.
+    execFileSync('git', ['-C', repo, 'worktree', 'remove', '--force', path.join(root, 'worktrees', `job-${id}`)]);
+
+    const pruned = JSON.parse(run(['--db', db, 'prune', '--json']).stdout);
+    assert.deepEqual(pruned.ids, [id], `the spec cleanup should count as a removal: ${JSON.stringify(pruned)}`);
+    assert.equal(fs.existsSync(piWorktree), false, 'the standalone spec worktree must be pruned');
+    const branches = execFileSync('git', ['-C', repo, 'branch', '--list', `pi/${slug}`], { encoding: 'utf8' });
+    assert.equal(branches.trim(), '', 'the standalone spec branch must be deleted');
+  } finally {
+    fs.rmSync(piWorktree, { recursive: true, force: true });
+  }
+});
+
 test('prune never deletes legacy standalone resources outside the job contract', () => {
   const root = tmpdir();
   const repo = makeGitRepo(root);
@@ -592,8 +721,8 @@ sleep 0.05
   assert.equal(summary.blocked, undefined);
 });
 
-test('resolveExecutor defaults to the repo-level pi-issue.sh kernel', () => {
-  assert.equal(resolveExecutor({ repo_path: '/tmp/target-repo' }, {}), path.resolve(__dirname, '..', 'pi-issue.sh'));
+test('resolveExecutor defaults to the repo-level pi-task.sh kernel', () => {
+  assert.equal(resolveExecutor({ repo_path: '/tmp/target-repo' }, {}), path.resolve(__dirname, '..', 'pi-task.sh'));
   assert.equal(resolveExecutor({ repo_path: '/tmp/target-repo' }, { executor: '/tmp/custom.sh' }), '/tmp/custom.sh');
 });
 
@@ -778,6 +907,66 @@ echo 'branch   : pi/issue-'"$1"
   assert.equal(result.exitCode, 0);
   // big floor 45 rejects the 40-intelligence cheap model.
   assert.equal(fs.readFileSync(seenModel, 'utf8').trim(), STRONG_MODEL);
+});
+
+test('run-next routes a spec task at the tier stored at enqueue', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const spec = path.join(root, 'spec.md');
+  fs.writeFileSync(spec, '# Tiered spec\n\nbody\n');
+  const fixture = writeRoutingFixture();
+  const seenModel = path.join(root, 'model.txt');
+  const executor = makeExecutor(root, `#!/usr/bin/env bash
+set -euo pipefail
+echo "$2" > ${JSON.stringify(seenModel)}
+${emitResult(root, resultPayload())}
+`);
+
+  run(['--db', db, 'enqueue', '--repo', repo, '--spec', spec, '--model', 'auto', '--tier', 'big', '--trusted']);
+
+  // No --tier here: the task's stored tier must decide, or the later review
+  // would be credited to a tier the run never used.
+  const stored = run(['--db', db, '--kind', 'spec', 'run-next', '--executor', executor, '--quota', fixture.quotaPath, '--json'], fixture.env());
+  assert.equal(stored.exitCode, 0, stored.stderr);
+  assert.equal(fs.readFileSync(seenModel, 'utf8').trim(), STRONG_MODEL, 'big floor 45 rejects the 40-intelligence cheap model');
+
+  // An explicit --tier still wins over the stored one.
+  run(['--db', db, 'enqueue', '--repo', repo, '--spec', spec, '--model', 'auto', '--tier', 'big', '--trusted']);
+  const explicit = run(['--db', db, '--kind', 'spec', 'run-next', '--executor', executor, '--quota', fixture.quotaPath, '--tier', 'small', '--json'], fixture.env());
+  assert.equal(explicit.exitCode, 0, explicit.stderr);
+  assert.equal(fs.readFileSync(seenModel, 'utf8').trim(), CHEAP_MODEL);
+});
+
+test('a retry re-resolves at the tier stored at enqueue', () => {
+  const root = tmpdir();
+  const repo = makeRepo(root);
+  const db = path.join(root, 'jobs.sqlite');
+  const spec = path.join(root, 'spec.md');
+  fs.writeFileSync(spec, '# Retry tier\n\nbody\n');
+  const fixture = writeRoutingFixture();
+  const models = path.join(root, 'models.txt');
+  const count = path.join(root, 'count');
+  const executor = makeExecutor(root, `#!/usr/bin/env bash
+set -euo pipefail
+echo "$2" >> ${JSON.stringify(models)}
+n=$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > ${JSON.stringify(count)}
+if [ "$n" -eq 1 ]; then exit 7; fi
+${emitResult(root, resultPayload())}
+`);
+
+  run(['--db', db, 'enqueue', '--repo', repo, '--spec', spec, '--model', 'auto', '--tier', 'big', '--trusted']);
+
+  const result = run([
+    '--db', db, '--kind', 'spec', 'run-next', '--executor', executor,
+    '--quota', fixture.quotaPath, '--retry', '1', '--retry-base-ms', '1', '--json',
+  ], fixture.env());
+  assert.equal(result.exitCode, 0, result.stderr);
+  const seen = fs.readFileSync(models, 'utf8').trim().split('\n');
+  assert.equal(seen.length, 2, 'the failed attempt and its retry both ran');
+  assert.deepEqual(seen, [STRONG_MODEL, STRONG_MODEL], 'the retry must not fall back to the default tier');
 });
 
 test('run-next rejects an unknown --tier', () => {
@@ -1845,7 +2034,7 @@ test('a local completion with a mismatching pinned-input digest is rejected', as
   source.db.prepare('UPDATE tasks SET prompt = ? WHERE id = ?').run(JSON.stringify(tampered), id);
 
   await assert.rejects(
-    source.sink.finish(job, { status: 'succeeded', inputSha256: job.issue_input.sha256 }),
+    source.sink.finish(job, { status: 'succeeded', inputSha256: job.task_input.sha256 }),
     /digest does not match/i,
   );
   assert.equal(source.status()[0].status, 'running');

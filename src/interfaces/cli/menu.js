@@ -308,7 +308,7 @@ async function doRunNext(rl, source) {
     return;
   }
   const verify = await ask(rl, 'verify command [npm test]: ', 'npm test');
-  const opts = { executor: path.join(ROOT, 'pi-issue.sh'), verify };
+  const opts = { executor: path.join(ROOT, 'pi-task.sh'), verify };
   let result;
   try {
     result = await runNext(source, opts);
@@ -329,7 +329,7 @@ async function doRunNext(rl, source) {
 
 async function doDrain(rl, source) {
   const verify = await ask(rl, 'verify command [npm test]: ', 'npm test');
-  const opts = { executor: path.join(ROOT, 'pi-issue.sh'), verify };
+  const opts = { executor: path.join(ROOT, 'pi-task.sh'), verify };
   let ran = 0, succeeded = 0, failed = 0, unverified = 0, busy = false;
   while (true) {
     let result;

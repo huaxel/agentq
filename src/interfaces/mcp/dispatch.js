@@ -36,6 +36,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { admit } = require('../../core/admission.js');
 const { rank } = require('../../core/routing.js');
+const { storedTier } = require('../../core/auto-model.js');
 const {
   TIERS,
   assertKnownArgs,
@@ -53,7 +54,8 @@ const MAX_DISPATCH_MAX = 32;
 const MAX_LOG_TAIL_BYTES = 4096;
 
 /** The only task kind this server can dispatch (it never passes --kind). */
-const DISPATCHABLE_KIND = 'github_issue';
+/** Kinds a plain pi/claude worker can run: the same executor family. */
+const DISPATCHABLE_KINDS = Object.freeze(['github_issue', 'spec']);
 
 /** A task in one of these states will never run again. */
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'unverified', 'rejected']);
@@ -477,7 +479,7 @@ function buildDispatchTools(deps) {
       handler(args) {
         assertKnownArgs(args, ['id', 'model', 'tier']);
         const id = requiredString(args, 'id', { max: 128 });
-        const tier = optionalEnum(args, 'tier', TIERS) ?? 'medium';
+        const requestedTier = optionalEnum(args, 'tier', TIERS);
         const requested = args.model === undefined || args.model === null
           ? null
           : requiredString(args, 'model', { max: 128 });
@@ -489,6 +491,10 @@ function buildDispatchTools(deps) {
         if (task.status !== 'pending') {
           throw new Error(`Task ${id} is ${task.status}, not pending: only a pending task can be dispatched.`);
         }
+        // The requested tier is stored at enqueue time in routing_policy; an
+        // explicit argument still wins, and the event records the tier that
+        // was actually used so review_task can read it back.
+        const tier = requestedTier ?? storedTier(task) ?? 'medium';
         const approval = approvalState(task);
         if (approval === 'pending') {
           throw new Error(
@@ -496,9 +502,9 @@ function buildDispatchTools(deps) {
           );
         }
         if (approval === 'rejected') throw new Error(`Task ${id} was rejected and cannot be dispatched.`);
-        if (task.kind !== DISPATCHABLE_KIND) {
+        if (!DISPATCHABLE_KINDS.includes(task.kind)) {
           throw new Error(
-            `Task ${id} is kind '${task.kind}'; this server dispatches '${DISPATCHABLE_KIND}' tasks only `
+            `Task ${id} is kind '${task.kind}'; this server dispatches ${DISPATCHABLE_KINDS.join(' or ')} tasks only `
             + '(other kinds need an executor and boundary it does not configure).',
           );
         }
@@ -764,7 +770,7 @@ module.exports = {
   DEFAULT_MAX_ATTEMPTS,
   MAX_DISPATCH_MAX,
   MAX_LOG_TAIL_BYTES,
-  DISPATCHABLE_KIND,
+  DISPATCHABLE_KINDS,
   DISPATCH_VALUE_FLAGS,
   DISPATCH_BOOLEAN_FLAGS,
 };

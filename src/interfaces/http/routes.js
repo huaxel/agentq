@@ -14,7 +14,7 @@ const { EventEmitter } = require('node:events');
 const dbModule = require('../../queue/db.js');
 const { classifyOutcome } = require('../../core/path-health.js');
 const DASHBOARD_HTML = require('./dashboard-html.js');
-const { fetchIssueInputAsync } = require('../../core/issue-input.js');
+const { fetchTaskInputAsync } = require('../../core/task-input.js');
 
 // Global event bus for pushing state changes to connected SSE clients.
 const taskBus = new EventEmitter();
@@ -494,7 +494,7 @@ async function handleCreateTask(req, res, db, options = {}) {
         sendError(res, 'Issue input capture is busy; retry enqueueing later.', 503);
         return;
       }
-      const capture = options.captureIssueInput || fetchIssueInputAsync;
+      const capture = options.captureIssueInput || fetchTaskInputAsync;
       activeIssueCaptures++;
       try {
         body.prompt = JSON.stringify(await capture(repo, body.issue_num));

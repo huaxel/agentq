@@ -24,6 +24,9 @@ scripts/
 *.md
 justfile
 pi-issue.sh
+claude-issue.sh
+pi-task.sh
+claude-task.sh
 *.xlsx
 osxphotos_crash.log
 jules_test.txt

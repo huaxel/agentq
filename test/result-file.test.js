@@ -30,10 +30,11 @@ const {
   writeResultFile,
 } = require('../src/runners/result-file.js');
 const { executeJob } = require('../src/runners/execute.js');
-const { SqliteSource, rawIssue } = require('./helpers/pinned-issue.js');
+const { SqliteSource, rawIssue, taskInputForIssue } = require('./helpers/pinned-issue.js');
+const { createInlineTaskInput } = require('../src/core/task-input.js');
 
 const ROOT = path.join(__dirname, '..');
-const PI_ISSUE = path.join(ROOT, 'pi-issue.sh');
+const PI_TASK = path.join(ROOT, 'pi-task.sh');
 const PI_WORKFLOW = path.join(ROOT, 'pi-workflow.sh');
 
 function tmpdir() {
@@ -378,7 +379,7 @@ function scriptEnv(fake, worktree, resultPath, extra = {}) {
   };
 }
 
-for (const [name, script] of [['pi-issue.sh', PI_ISSUE], ['pi-workflow.sh', PI_WORKFLOW]]) {
+for (const [name, script] of [['pi-task.sh', PI_TASK], ['pi-workflow.sh', PI_WORKFLOW]]) {
   test(`${name} writes one valid result file and ignores hostile issue text`, (t) => {
     const root = tmpdir();
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -387,7 +388,7 @@ for (const [name, script] of [['pi-issue.sh', PI_ISSUE], ['pi-workflow.sh', PI_W
     fs.mkdirSync(worktree);
     const fake = fakePi(root);
     const resultPath = path.join(root, 'result.json');
-    const snapshot = require('./helpers/pinned-issue.js').snapshotForIssue(42, HOSTILE_BODY);
+    const snapshot = taskInputForIssue(42, HOSTILE_BODY);
 
     const run = spawnSync('bash', [script, '42', 'test/model', '--agentq-pinned-input'], {
       cwd: repo,
@@ -415,6 +416,76 @@ for (const [name, script] of [['pi-issue.sh', PI_ISSUE], ['pi-workflow.sh', PI_W
   });
 }
 
+test('pi-task.sh runs a spec task from its pinned input, with spec framing', (t) => {
+  const root = tmpdir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const repo = makeGitRepo(root);
+  const worktree = path.join(root, 'reused-worktree');
+  fs.mkdirSync(worktree);
+  const fake = fakePi(root);
+  const resultPath = path.join(root, 'result.json');
+  const input = createInlineTaskInput('Spec title', 'SPEC BODY MARKER\nsecond line');
+  const taskId = '11111111-2222-3333-4444-555555555555';
+
+  const run = spawnSync('bash', [PI_TASK, taskId, 'test/model', '--agentq-pinned-input'], {
+    cwd: repo,
+    encoding: 'utf8',
+    timeout: 60_000,
+    input: JSON.stringify(input),
+    env: {
+      ...process.env,
+      PATH: `${fake.bin}${path.delimiter}${process.env.PATH}`,
+      AGENTQ_PINNED_INPUT: '1',
+      AGENTQ_INPUT_SHA256: input.sha256,
+      AGENTQ_WORKTREE: worktree,
+      BASE_BRANCH: 'master',
+      AGENTQ_RESULT: resultPath,
+    },
+  });
+
+  assert.equal(run.status, 0, run.stderr);
+  const prompt = fake.read().stdin;
+  // The spec body reaches the model, and the issue framing does not.
+  assert.match(prompt, /SPEC BODY MARKER/);
+  assert.match(prompt, /Implement this specification and nothing else\./);
+  assert.match(prompt, /Spec: Spec title/);
+  assert.doesNotMatch(prompt, /GitHub issue/);
+  // A spec task names its worktree from the title, not an issue number.
+  const written = readResultFile(resultPath);
+  assert.equal(written.ok, true, written.detail);
+  assert.equal(written.value.branch, 'pi/task-spec-title');
+  assert.equal(written.value.worktree, worktree);
+});
+
+test('pi-task.sh refuses a pinned input whose digest does not match', (t) => {
+  const root = tmpdir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const repo = makeGitRepo(root);
+  const worktree = path.join(root, 'reused-worktree');
+  fs.mkdirSync(worktree);
+  const fake = fakePi(root);
+  const input = createInlineTaskInput('Spec title', 'body');
+
+  const run = spawnSync('bash', [PI_TASK, 'task-id', 'test/model', '--agentq-pinned-input'], {
+    cwd: repo,
+    encoding: 'utf8',
+    timeout: 60_000,
+    input: JSON.stringify(input),
+    env: {
+      ...process.env,
+      PATH: `${fake.bin}${path.delimiter}${process.env.PATH}`,
+      AGENTQ_PINNED_INPUT: '1',
+      AGENTQ_INPUT_SHA256: 'a'.repeat(64),
+      AGENTQ_WORKTREE: worktree,
+      BASE_BRANCH: 'master',
+    },
+  });
+
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /Invalid task input/);
+  assert.equal(fs.existsSync(fake.record), false, 'a digest mismatch must not reach the model');
+});
+
 test('an echoed sentinel that is not the last line does not set stop', (t) => {
   const root = tmpdir();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -423,9 +494,9 @@ test('an echoed sentinel that is not the last line does not set stop', (t) => {
   fs.mkdirSync(worktree);
   const fake = fakePi(root, { finalLine: 'Implemented the issue.' });
   const resultPath = path.join(root, 'result.json');
-  const snapshot = require('./helpers/pinned-issue.js').snapshotForIssue(42, HOSTILE_BODY);
+  const snapshot = taskInputForIssue(42, HOSTILE_BODY);
 
-  const run = spawnSync('bash', [PI_ISSUE, '42', 'test/model', '--agentq-pinned-input'], {
+  const run = spawnSync('bash', [PI_TASK, '42', 'test/model', '--agentq-pinned-input'], {
     cwd: repo,
     encoding: 'utf8',
     timeout: 60_000,
@@ -443,9 +514,9 @@ test('a standalone run without AGENTQ_RESULT writes no result file', (t) => {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repo = makeGitRepo(root);
   const fake = fakePi(root);
-  const snapshot = require('./helpers/pinned-issue.js').snapshotForIssue(42, 'body');
+  const snapshot = taskInputForIssue(42, 'body');
 
-  const run = spawnSync('bash', [PI_ISSUE, '42', 'test/model', '--agentq-pinned-input'], {
+  const run = spawnSync('bash', [PI_TASK, '42', 'test/model', '--agentq-pinned-input'], {
     cwd: repo,
     encoding: 'utf8',
     timeout: 60_000,
@@ -472,7 +543,7 @@ test('a hostile issue body cannot steer the persisted metadata', async (t) => {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repo = makeGitRepo(root);
   const fake = fakePi(root, { finalLine: 'Implemented the issue.' });
-  // The queue captures this text as the pinned snapshot; the real pi-issue.sh
+  // The queue captures this text as the pinned snapshot; the real pi-task.sh
   // then echoes it into its stdout, which is the attack surface under test.
   const source = new SqliteSource(path.join(root, 'queue.sqlite'), {
     issueRunner: () => JSON.stringify(rawIssue(42, HOSTILE_BODY)),
@@ -483,7 +554,7 @@ test('a hostile issue body cannot steer the persisted metadata', async (t) => {
   const executor = path.join(root, 'executor.sh');
   fs.writeFileSync(executor, `#!/bin/sh
 export PATH=${JSON.stringify(fake.bin)}:"$PATH"
-exec bash ${JSON.stringify(PI_ISSUE)} "$@"
+exec bash ${JSON.stringify(PI_TASK)} "$@"
 `, { mode: 0o755 });
 
   const result = await executeJob(job, { executor, verify: 'true', stopWhen: 'done' }, source);

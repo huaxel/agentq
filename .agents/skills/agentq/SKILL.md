@@ -354,11 +354,11 @@ npm run agentq -- jules-sessions
 
 ### Headless pi wrappers
 
-Two bash scripts run pi headless on GitHub issues in isolated worktrees:
+Two bash scripts run pi headless on a pinned task input (a GitHub issue or a local spec) in isolated worktrees:
 
 | Script | Model argument | Workflow style |
 |---|---|---|
-| `pi-issue.sh <N> <provider/model>` | required | Single-shot prompt with stop-condition support |
+| `pi-task.sh <N|task-id> <provider/model>` | required | Single-shot prompt with stop-condition support |
 | `pi-workflow.sh <N> <provider/model> [workflow]` | required | 3-phase workflow (analyze → implement → verify) via pi-dynamic-workflows |
 
 Neither wrapper has a default model: a missing model is a usage error (exit 2),
@@ -375,7 +375,7 @@ Both capture session JSONL for cost tracking and support `AGENTQ_STOP_WHEN` for 
 | `src/runners/execute.js` | Job execution, worktree prep, model picking, verification |
 | `src/queue/sources.js` | Local in-process SQLite source and orchestrator HTTP source |
 | `src/interfaces/cli/menu.js` | Interactive readline menu |
-| `pi-issue.sh` | Single-shot headless pi runner |
+| `pi-task.sh` | Single-shot headless pi runner (`pi-issue.sh` is a wrapper) |
 | `pi-workflow.sh` | 3-phase workflow pi runner |
 
 ---
@@ -490,7 +490,7 @@ npm run build      # Build dashboard (if applicable)
 
 ## Security Notes
 
-- `agentq` and `pi-issue.sh` execute `pi` headless with full user rights. Treat issue bodies as **untrusted code**.
+- `agentq` and `pi-task.sh` execute `pi` headless with full user rights. Treat task text as **untrusted code**.
 - Never commit `AUTH_TOKEN`, API keys, or `data/orchestrator.sqlite` (all gitignored by default).
 - The Docker dashboard is read-only without auth and binds host loopback by default. Use `tailscale serve` rather than adding a public bind; set `REFRESH_TOKEN` for remote mutations.
 - Jobs default to **untrusted** — do not casually bypass the trust gate.

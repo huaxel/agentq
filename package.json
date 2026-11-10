@@ -55,7 +55,7 @@
     "test": "node --test",
     "lint": "biome check src/ test/ testdata/ bin/ scripts/ docs/*.md biome.json package.json tsconfig.json README.md justfile --no-errors-on-unmatched --files-ignore-unknown=true",
     "typecheck": "tsc --noEmit && node scripts/check-js-syntax.js",
-    "check": "npm run lint && npm run typecheck && bash -n pi-issue.sh claude-issue.sh pi-workflow.sh bin/*.sh .agents/skills/agentq/scripts/*.sh && npm test && npm run verify:fixtures",
+    "check": "npm run lint && npm run typecheck && bash -n pi-issue.sh pi-task.sh claude-issue.sh claude-task.sh pi-workflow.sh bin/*.sh .agents/skills/agentq/scripts/*.sh && npm test && npm run verify:fixtures",
     "ci": "npm run check && npm run build:fixtures",
     "ci:isolated": "fixture_home=$(mktemp -d) && trap 'rm -rf \"$fixture_home\"' EXIT && cp -R testdata/home/. \"$fixture_home/\" && AGENTQ_HOME=\"$fixture_home\" AGENTQ_FIXTURE_HOME=\"$fixture_home\" npm run ci",
     "build:fixtures": "AGENTQ_HOME=${AGENTQ_FIXTURE_HOME:-testdata/home} node src/roi-tracker/pipeline.js && AGENTQ_HOME=${AGENTQ_FIXTURE_HOME:-testdata/home} node src/roi-tracker/render-html.js && AGENTQ_HOME=${AGENTQ_FIXTURE_HOME:-testdata/home} node src/roi-tracker/export-csv.js",

@@ -42,7 +42,7 @@ test('there is exactly one task runner: npm scripts', () => {
 test('package.json owns the collection entry points', () => {
   assert.equal(pkg.scripts.collect, 'npm run collect-machine --');
   assert.equal(pkg.scripts['collect:sync'], 'npm run collect-machine -- --tokscale --daily --sync-git');
-  assert.equal(pkg.scripts.check, 'npm run lint && npm run typecheck && bash -n pi-issue.sh claude-issue.sh pi-workflow.sh bin/*.sh .agents/skills/agentq/scripts/*.sh && npm test && npm run verify:fixtures');
+  assert.equal(pkg.scripts.check, 'npm run lint && npm run typecheck && bash -n pi-issue.sh pi-task.sh claude-issue.sh claude-task.sh pi-workflow.sh bin/*.sh .agents/skills/agentq/scripts/*.sh && npm test && npm run verify:fixtures');
 });
 
 test('package.json owns the docker and clean entry points', () => {

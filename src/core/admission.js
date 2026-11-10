@@ -12,7 +12,7 @@
  * throwing) so the policy itself stays testable in isolation.
  */
 
-const { validateIssueJob } = require('./issue-input.js');
+const { validateTaskJob } = require('./task-input.js');
 
 /**
  * Admission checks in the order they run. Names are stable identifiers for
@@ -44,7 +44,7 @@ const ADMISSION_CHECKS = Object.freeze([
  * Checks, in order: (1) --cua only runs feedback jobs, (2) feedback needs a
  * prompt, (3) feedback needs a model, (4) the trust gate, (5) the pinned issue
  * input must validate. The job is never mutated; check (5) returns a copy with
- * the canonical `issue_input` when validation yields one.
+ * the canonical `task_input` when validation yields one.
  *
  * @param {object} job
  * @param {AdmissionCaps} caps
@@ -65,12 +65,12 @@ function admit(job, caps) {
     const reason = job.kind === 'feedback'
       ? `Refusing feedback job #${job.id} without --sandbox or --allow-untrusted. Feedback content is always untrusted.`
       : `Refusing untrusted job #${job.id} without --sandbox or --allow-untrusted. ` +
-        `Issue text can contain arbitrary instructions; pi executes bash with your full user rights.`;
+        `Task text can contain arbitrary instructions; pi executes bash with your full user rights.`;
     return { ok: false, reason, retryable: false };
   }
   try {
-    const input = validateIssueJob(job);
-    return { ok: true, job: input ? { ...job, issue_input: input } : job };
+    const input = validateTaskJob(job);
+    return { ok: true, job: input ? { ...job, task_input: input } : job };
   } catch (error) {
     // Preserve the original error object: callers rethrow it so its type and
     // extra properties (statusCode) survive the gate.
