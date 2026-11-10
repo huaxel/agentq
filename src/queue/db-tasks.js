@@ -956,10 +956,12 @@ function completeTask(db, taskId, result, { claimedBy, claimToken } = {}) {
         WHERE id = ?
       `).run(finalStatus, json(result), ts, taskId);
 
+      // `setup` sits before the long input digest so `show` (one truncated
+      // line per event) still names the command that prepared the worktree.
       db.prepare(`
         INSERT INTO task_events (task_id, event, payload, created_at)
         VALUES (?, 'completed', ?, ?)
-      `).run(taskId, json({ status: result.status, input_sha256: result.input_sha256 }), ts);
+      `).run(taskId, json({ status: result.status, setup: result.setup ?? null, input_sha256: result.input_sha256 }), ts);
     }
 
     if (result.usage) {

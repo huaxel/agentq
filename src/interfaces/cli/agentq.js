@@ -56,9 +56,9 @@ const SAVED_WORKFLOWS_DIR = path.join(os.homedir(), '.pi', 'workflows', 'saved')
 function usage() {
   return `Usage:
   node bin/agentq.js [global opts] enqueue --repo PATH (--issue N | --spec FILE) [--model MODEL] [--tier T] [--base BRANCH] [--depends-on ID[,ID...]] [--trusted] [--commit|--no-commit] [--commit-author "Name <email>"] [--json]
-  node bin/agentq.js [global opts] run-next [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
-  node bin/agentq.js [global opts] run --id ID [--model MODEL|auto] [--tier T] [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
-  node bin/agentq.js [global opts] drain [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
+  node bin/agentq.js [global opts] run-next [--executor PATH] [--verify CMD] [--setup CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
+  node bin/agentq.js [global opts] run --id ID [--model MODEL|auto] [--tier T] [--executor PATH] [--verify CMD] [--setup CMD] [--sandbox PATH | --cua] [--allow-untrusted] [--quota PATH] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
+  node bin/agentq.js [global opts] drain [--executor PATH] [--verify CMD] [--setup CMD] [--sandbox PATH | --cua] [--quota PATH] [--tier T] [--retry N] [--retry-base-ms MS] [--stop-when NL] [--json]
   node bin/agentq.js [global opts] requeue --id ID [--model MODEL] [--json]
   node bin/agentq.js [global opts] recover [--max-age-min N] [--json]
   node bin/agentq.js [global opts] prune [--force] [--json]
@@ -97,6 +97,15 @@ function usage() {
     claude -> claude-task.sh). --executor overrides it; --workflow,
     feedback jobs and --cua stay pi-only. A spec task runs on pi-task.sh
     unless --executor or the task's stored executor says otherwise.
+
+  Worktree setup:
+    A fresh git worktree has no installed dependencies. --setup CMD runs
+    once in a newly created job worktree before the agent starts (e.g.
+    --setup "npm ci"); without it the repo's agentq.setup git config
+    applies. A retry skips setup once it has succeeded in that worktree,
+    and runs it again after a failed one.
+    A failed setup ends the attempt before the agent runs, as
+    infrastructure recovery rather than a model failure.
 
   run --id:
     Claims exactly that task (id or unique prefix) instead of the next one, so
@@ -232,6 +241,7 @@ function parseArgs(argv) {
     else if (flag === '--private') options.private = true;
     else if (flag === '--threshold') options.threshold = Number(needValue(args, flag));
     else if (flag === '--verify') options.verify = needValue(args, flag);
+    else if (flag === '--setup') options.setup = needValue(args, flag);
     else if (flag === '--retry') options.retries = Number(needValue(args, flag));
     else if (flag === '--retry-base-ms') options.retryBaseMs = Number(needValue(args, flag));
     else if (flag === '--stop-when') options.stopWhen = needValue(args, flag);

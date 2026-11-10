@@ -182,7 +182,7 @@ npm run agentq -- review add --task 3f2a8c1e \
 
 ```bash
 npm run agentq -- run --id 3f2a8c1e [--model MODEL|auto] [--tier T] \
-  [--executor PATH] [--verify CMD] [--sandbox PATH | --cua] \
+  [--executor PATH] [--verify CMD] [--setup CMD] [--sandbox PATH | --cua] \
   [--allow-untrusted] [--retry N] [--json]
 ```
 
@@ -603,6 +603,42 @@ npm run agentq -- drain --verify 'npm test'
 The command runs inside the job worktree after a successful agent exit. A failed
 check records `unverified`, not `succeeded`, and returns a non-zero process
 status.
+
+### Worktree setup
+
+```bash
+npm run agentq -- drain --setup 'npm ci' --verify 'npm test'
+```
+
+A fresh git worktree has no installed dependencies, so `--verify` would fail
+at once (`biome: command not found`) and the agent could not run the
+project's tests. `--setup CMD` runs once in a newly created job worktree
+before the agent starts, with the worktree as its working directory (through
+the sandbox wrapper when one is set, like `--verify`). Without `--setup`,
+the repo's `agentq.setup` git config applies — set it once per repo with
+plain git config:
+
+```bash
+git config agentq.setup "npm ci"
+```
+
+The config is read from git itself, never from a file inside the repo: a
+repo's content must not be able to make agentq run a command. MCP
+`dispatch_task` accepts no setup argument (unknown arguments are rejected);
+a dispatched worker still picks up the repo's git config, which only the
+machine owner can set.
+
+Setup runs once per managed worktree, never for a non-git `repo_path` run
+in place. A retry after a successful setup skips it; a retry after a failed
+one (the task is re-pended and the worktree kept) runs it again. Success is
+recorded as `agentq-setup.done` in the worktree's own git dir, so it never
+shows up as a change. Its output lands in the job log under a `--- setup ---`
+header, and the command is recorded in the task's `completed` event payload
+so `agentq show --id` says what ran. A failed setup (non-zero exit or
+timeout) ends the attempt before the agent runs, as infrastructure recovery —
+not a model failure — so it counts against neither the model nor the path.
+The verification identity is captured after setup, so installed (gitignored)
+files never count as artifact changes.
 
 ### Retry with backoff
 

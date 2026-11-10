@@ -428,6 +428,92 @@ function isGitRepo(repo) {
   }
 }
 
+/**
+ * The one-off command that prepares a fresh job worktree, in order:
+ *
+ * 1. `agentq run --setup "CMD"`;
+ * 2. the target repo's `agentq.setup` git config, so an owner sets `npm ci`
+ *    once per repo with plain git config.
+ *
+ * Nothing is ever read from a file inside the repo: a repo's content must
+ * not be able to make agentq run a command, and only the machine owner can
+ * set local git config. An unset key (git exits 1) means "no setup".
+ *
+ * @param {Record<string, any>} [options] CLI-style options (`setup`)
+ * @param {string|null|undefined} repoPath
+ * @returns {string|null} the setup command, or null when none is configured
+ */
+function resolveSetupCommand(options = {}, repoPath) {
+  if (typeof options.setup === 'string' && options.setup.trim() !== '') return options.setup;
+  if (typeof repoPath !== 'string' || !repoPath) return null;
+  let raw;
+  try {
+    raw = execFileSync('git', ['-C', repoPath, 'config', '--get', 'agentq.setup'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+    }).trim();
+  } catch {
+    return null;
+  }
+  return raw || null;
+}
+
+/**
+ * Where a worktree records that its setup succeeded: inside the worktree's own
+ * git dir, so the marker never shows up as a change in the tree (the same place
+ * the pi session transcript lives).
+ *
+ * @param {string} worktree
+ * @returns {string}
+ */
+function setupMarkerPath(worktree) {
+  const gitDir = execFileSync('git', ['-C', worktree, 'rev-parse', '--absolute-git-dir'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+  }).trim();
+  return path.join(gitDir, 'agentq-setup.done');
+}
+
+// The setup step shares verify's bound: dependency installs are the slow case.
+const SETUP_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Run the setup command once in a newly created job worktree, before the
+ * executor starts. The command runs via a shell with `cwd` at the worktree
+ * (through the sandbox wrapper when one is set, exactly like verify), and
+ * its output lands in the job log under a `--- setup ---` header.
+ *
+ * A failure throws, so the attempt fails before the executor runs and
+ * runOnce's catch reports it through sink.recover — the same infra path as
+ * a worktree-creation failure, never a model outcome.
+ *
+ * @param {{ sink: { statePath?: string }, job: Record<string, any>, logPath: string, cwd: string, command: string, env: Record<string, string>, sandbox?: string }} params
+ * @returns {Promise<{ command: string, exit_code: number }>} for the completion record
+ */
+async function runWorktreeSetup({ sink, job, logPath, cwd, command, env, sandbox }) {
+  const prefix = `\n--- setup ---\n${command}\n`;
+  const base = {
+    cwd,
+    env,
+    timeoutMs: SETUP_TIMEOUT_MS,
+    statePath: sink.statePath,
+    jobId: job.id,
+    outputPath: logPath,
+    appendOutput: true,
+    outputPrefix: prefix,
+  };
+  const result = sandbox
+    ? await runAsync(sandbox, ['sh', '-c', command], base)
+    : await runAsync('sh', ['-c', command], base);
+  // A deadline breach is failure even if signal cleanup exits zero.
+  const exitCode = result.timedOut ? 124 : (result.exitCode ?? 1);
+  fs.appendFileSync(logPath, `exit=${exitCode}\n`);
+  if (exitCode !== 0) {
+    throw new Error(
+      `Setup command ${JSON.stringify(command)} failed in ${cwd} (exit ${exitCode}${result.timedOut ? ', timed out' : ''})`,
+    );
+  }
+  return { command, exit_code: exitCode };
+}
+
 function runVerify(command, cwd) {
   const result = spawnSync(command, [], {
     cwd,
@@ -628,6 +714,13 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
   let completionPersisted = false;
   try {
     const runCwd = prepareJobWorktree(sink, job);
+    // The setup command runs only in a managed worktree that has not been
+    // set up yet: a retry after a successful setup skips it, a retry after a
+    // FAILED setup (the task was re-pended, the worktree kept) runs it again,
+    // and a non-git repo_path runs in place with nothing to prepare.
+    const managedWorktree = isGitRepo(job.repo_path) && runCwd === sink.worktreePath(job.id);
+    const setupMarker = managedWorktree ? setupMarkerPath(runCwd) : null;
+    const needsSetup = Boolean(setupMarker) && !fs.existsSync(setupMarker);
     // The commit policy travels with the task (taskToJob) or the raw row
     // (orchestrator claims). Resolve the author here, not in the shell
     // scripts, and hand both to the executor as environment.
@@ -662,6 +755,22 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
     }
     if (options.cua && options.verify) env.AGENTQ_VERIFY_COMMAND = options.verify;
     if (options.stopWhen) env.AGENTQ_STOP_WHEN = options.stopWhen;
+    // Optional one-off worktree preparation (dependency install): --setup
+    // wins, else the repo's agentq.setup git config. It runs before the
+    // executor, and the verification identity below is captured after it, so
+    // setup side effects (gitignored installs) never count as artifact
+    // changes. A failure throws: the attempt ends here, through the same
+    // infra recovery as a worktree-creation failure, with no model outcome.
+    const setupCommand = needsSetup
+      ? resolveSetupCommand(options, job.repo_path || job.repo || null)
+      : null;
+    const setup = setupCommand
+      ? await runWorktreeSetup({
+        sink, job, logPath: logPathJob, cwd: runCwd, command: setupCommand, env, sandbox: options.sandbox,
+      })
+      : null;
+    // Only a successful setup marks the worktree as prepared.
+    if (setup) fs.writeFileSync(setupMarker, `${setup.command}\n`);
     const timeoutMs = options.timeout || EXECUTOR_TIMEOUT_MS;
     // Everything the executor writes must be newer than this, and owned by this
     // user; a pre-existing or foreign file is never accepted.
@@ -791,6 +900,10 @@ async function runOnce(job, options, source, preclaimed = null, attemptState = n
       log: logPathJob,
       verified,
       verification,
+      // What prepared the worktree, so `show` says what ran. Null when no
+      // setup was configured (or the worktree was reused): the completed
+      // event payload carries it.
+      setup,
       stop,
       unexpectedCommits: meta?.unexpectedCommits ?? null,
       // The sinks persist this as `result_file`; null means the executor
@@ -848,6 +961,8 @@ module.exports = {
   isSafeBranchName,
   commitPolicyOf,
   resolveCommitAuthor,
+  resolveSetupCommand,
+  runWorktreeSetup,
   prepareJobWorktree,
   isGitRepo,
   sleep,
