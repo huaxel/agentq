@@ -53,6 +53,21 @@ function makeGitRepo(root) {
   return repo;
 }
 
+/**
+ * A linked worktree, like the ones agentq hands the executor, so the session
+ * path is exercised against a real `.git/worktrees/<name>/` directory.
+ */
+function addLinkedWorktree(repo, name = 'reused-worktree', branch = name) {
+  const worktree = path.join(path.dirname(repo), name);
+  execFileSync('git', ['-C', repo, 'worktree', 'add', '-b', branch, worktree, 'master'], { stdio: 'ignore' });
+  return worktree;
+}
+
+/** The worktree's own git dir, resolved the way the executors resolve it. */
+function worktreeGitDir(worktree) {
+  return execFileSync('git', ['-C', worktree, 'rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim();
+}
+
 function valid(overrides = {}) {
   return {
     version: 1,
@@ -384,8 +399,7 @@ for (const [name, script] of [['pi-task.sh', PI_TASK], ['pi-workflow.sh', PI_WOR
     const root = tmpdir();
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const repo = makeGitRepo(root);
-    const worktree = path.join(root, 'reused-worktree');
-    fs.mkdirSync(worktree);
+    const worktree = addLinkedWorktree(repo);
     const fake = fakePi(root);
     const resultPath = path.join(root, 'result.json');
     const snapshot = taskInputForIssue(42, HOSTILE_BODY);
@@ -408,7 +422,17 @@ for (const [name, script] of [['pi-task.sh', PI_TASK], ['pi-workflow.sh', PI_WOR
     assert.equal(read.ok, true, read.detail);
     assert.equal(read.value.worktree, worktree, 'the script reports its own worktree, not the echoed one');
     assert.equal(read.value.branch, 'pi/issue-42');
-    assert.equal(read.value.session, path.join(worktree, '.pi-session.jsonl'));
+    // The transcript lives in the worktree's own git dir, so no `git add -A`
+    // there can stage it, and it is removed with the worktree.
+    const gitDir = worktreeGitDir(worktree);
+    const session = path.join(gitDir, 'agentq-pi-session.jsonl');
+    assert.match(gitDir, /\.git[\\/]worktrees[\\/]/, 'a linked worktree keeps its git dir outside the checkout');
+    assert.equal(read.value.session, session);
+    assert.equal(fs.existsSync(session), true, 'the fake pi wrote to the --session path it was given');
+    assert.equal(fake.read().argv[fake.read().argv.indexOf('--session') + 1], session);
+    assert.equal(fs.existsSync(path.join(worktree, '.pi-session.jsonl')), false);
+    const status = execFileSync('git', ['-C', worktree, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+    assert.doesNotMatch(status, /pi-session/, 'the worktree must not report the transcript as untracked');
     assert.deepEqual(read.value.usage, { inputTokens: 11, outputTokens: 22, cacheReadTokens: 33, totalCost: 0.04 });
     assert.equal(read.value.verification, null);
     // The agent's own last line is the sentinel.
@@ -420,8 +444,7 @@ test('pi-task.sh runs a spec task from its pinned input, with spec framing', (t)
   const root = tmpdir();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repo = makeGitRepo(root);
-  const worktree = path.join(root, 'reused-worktree');
-  fs.mkdirSync(worktree);
+  const worktree = addLinkedWorktree(repo, 'reused-worktree', 'pi/task-spec-title');
   const fake = fakePi(root);
   const resultPath = path.join(root, 'result.json');
   const input = createInlineTaskInput('Spec title', 'SPEC BODY MARKER\nsecond line');
@@ -450,11 +473,14 @@ test('pi-task.sh runs a spec task from its pinned input, with spec framing', (t)
   assert.match(prompt, /Implement this specification and nothing else\./);
   assert.match(prompt, /Spec: Spec title/);
   assert.doesNotMatch(prompt, /GitHub issue/);
-  // A spec task names its worktree from the title, not an issue number.
+  // A spec task reports the reused worktree and its branch, not an issue number.
   const written = readResultFile(resultPath);
   assert.equal(written.ok, true, written.detail);
   assert.equal(written.value.branch, 'pi/task-spec-title');
   assert.equal(written.value.worktree, worktree);
+  // The transcript stays in the worktree's git dir here too.
+  assert.equal(fs.existsSync(path.join(worktree, '.pi-session.jsonl')), false);
+  assert.equal(fs.existsSync(path.join(worktreeGitDir(worktree), 'agentq-pi-session.jsonl')), true);
 });
 
 test('pi-task.sh refuses a pinned input whose digest does not match', (t) => {
@@ -490,8 +516,7 @@ test('an echoed sentinel that is not the last line does not set stop', (t) => {
   const root = tmpdir();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repo = makeGitRepo(root);
-  const worktree = path.join(root, 'reused-worktree');
-  fs.mkdirSync(worktree);
+  const worktree = addLinkedWorktree(repo);
   const fake = fakePi(root, { finalLine: 'Implemented the issue.' });
   const resultPath = path.join(root, 'result.json');
   const snapshot = taskInputForIssue(42, HOSTILE_BODY);
@@ -565,7 +590,9 @@ exec bash ${JSON.stringify(PI_TASK)} "$@"
   const [stored] = source.status();
   assert.equal(fs.realpathSync(stored.worktree_path), fs.realpathSync(source.sink.worktreePath(job.id)));
   assert.equal(stored.branch, `agentq/job-${job.id}`);
-  assert.equal(stored.session_path, path.join(source.sink.worktreePath(job.id), '.pi-session.jsonl'));
+  assert.equal(stored.session_path, path.join(worktreeGitDir(source.sink.worktreePath(job.id)), 'agentq-pi-session.jsonl'));
+  assert.equal(fs.existsSync(stored.session_path), true);
+  assert.equal(fs.existsSync(path.join(source.sink.worktreePath(job.id), '.pi-session.jsonl')), false);
   assert.deepEqual(JSON.parse(stored.usage_json), {
     inputTokens: 11, outputTokens: 22, cacheReadTokens: 33, totalCost: 0.04,
   });

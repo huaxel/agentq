@@ -140,7 +140,11 @@ line as the VERY LAST line of your output and then stop:
 Otherwise do not print it. Keep working normally toward the task."
 fi
 
-SESSION="$wt/.pi-session.jsonl"
+# Keep the transcript out of the working tree: a reviewer who runs
+# `git add -A` there would otherwise commit prompt text and tool output. A
+# worktree's own git dir (`.git/worktrees/<name>/` for a linked worktree) is
+# never tracked and goes away with the worktree.
+SESSION="$(git -C "$wt" rev-parse --absolute-git-dir)/agentq-pi-session.jsonl"
 echo "▶ running pi headless (${MODEL})…"
 # pi's stdout is streamed (so the job log stays live) and a bounded copy of its
 # last 64 KiB is kept only so the stop sentinel can be checked as the agent's
@@ -177,6 +181,7 @@ if [ -f "$SESSION" ]; then
   grep '"usage"' "$SESSION" | tail -1 || echo "  (no inline usage record — try: pi --session \"$SESSION\" --print \"/session\")"
 else
   echo "▶ no session file at ${SESSION} — pi may have written its default location instead."
+  echo "  (the session lives in the worktree's git dir, not the working tree)"
   echo "  find it with: ls -t ~/.pi/agent/sessions | head -3"
 fi
 

@@ -206,7 +206,11 @@ if [ -n "${AGENTQ_WORKFLOW_ARGS:-}" ]; then
 Workflow args (JSON): ${AGENTQ_WORKFLOW_ARGS}"
 fi
 
-SESSION="$wt/.pi-session.jsonl"
+# Keep the transcript out of the working tree: a reviewer who runs
+# `git add -A` there would otherwise commit prompt text and tool output. A
+# worktree's own git dir (`.git/worktrees/<name>/` for a linked worktree) is
+# never tracked and goes away with the worktree.
+SESSION="$(git -C "$wt" rev-parse --absolute-git-dir)/agentq-pi-session.jsonl"
 echo "▶ running pi workflow (${MODEL})…"
 # pi's stdout is streamed (so the job log stays live) and a bounded copy of its
 # last 64 KiB is kept only so the stop sentinel can be checked as the agent's
