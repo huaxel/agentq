@@ -28,6 +28,25 @@ const {
 const { trackRecordStats } = require('../../core/track-record.js');
 
 /**
+ * Optional injected unlock thresholds: `deps.getTrackRecordPolicy()` returns
+ * the same policy the server routes with (src/core/snapshot.js). Absent (or
+ * throwing, or empty) means `trackRecordPolicy()`'s defaults, so `needed` still
+ * answers a question the caller can check against `config/roi.config.json`.
+ *
+ * @param {{ getTrackRecordPolicy?: () => { minReviews?: number, minLowerBound?: number } }} deps
+ * @returns {{ minReviews?: number, minLowerBound?: number }|undefined}
+ */
+function readTrackRecordPolicy(deps) {
+  if (!deps || typeof deps.getTrackRecordPolicy !== 'function') return undefined;
+  try {
+    const policy = deps.getTrackRecordPolicy();
+    return policy && typeof policy === 'object' ? policy : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Optional injected health: deps.getPathHealth() returns a
  * src/core/path-health.js Map when the server has DB access. Absent (or
  * throwing, or empty) means "route as today" — no caller changes shape.
@@ -465,9 +484,10 @@ function buildReadTools(deps) {
         + 'caller\'s verdict on what a model produced (accepted, accepted-with-fixes, rejected); '
         + 'accepted-with-fixes counts half, and a review at a harder tier also counts for the '
         + 'easier ones. `rate` is the weighted acceptance rate and `lowerBound` its Wilson 95% '
-        + 'lower bound. A record with enough reviews and a high enough bound can make a model '
-        + 'with no intelligence score eligible; otherwise it only informs. Same output as '
-        + '"agentq review stats".',
+        + 'lower bound. `needed` is how many more accepted reviews would clear both thresholds '
+        + '(0 already unlocks, null is out of reach). A record with enough reviews and a high '
+        + 'enough bound can make a model with no intelligence score eligible; otherwise it only '
+        + 'informs. Same output as "agentq review stats".',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true },
       handler(args) {
@@ -476,7 +496,7 @@ function buildReadTools(deps) {
           throw new Error('track records are unavailable: the server does not expose getTrackRecords');
         }
         const records = deps.getTrackRecords();
-        return trackRecordStats(records instanceof Map ? records : null);
+        return trackRecordStats(records instanceof Map ? records : null, readTrackRecordPolicy(deps));
       },
     },
     {

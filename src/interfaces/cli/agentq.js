@@ -134,6 +134,8 @@ function usage() {
     agentq review stats      The per-(model, tier) track records routing uses.
                              A record with enough reviews can make an unscored
                              model eligible; it never reorders scored models.
+                             Each row says how many more accepted reviews would
+                             unlock it (the needed column).
 
   Home:
     Everything personal lives outside the checkout, in $AGENTQ_HOME
@@ -687,7 +689,7 @@ function commandReview(global, options) {
   if (options.action === 'amend') return commandReviewAmend(global, options);
   if (options.action === 'list') return commandReviewList(global, options);
   if (options.action === 'stats') return commandReviewStats(global, options);
-  throw new Error(`unknown review command: ${options.action ?? '(none)'} (expected add, list or stats)`);
+  throw new Error(`unknown review command: ${options.action ?? '(none)'} (expected add, amend, list or stats)`);
 }
 
 function commandReviewAdd(global, options) {
@@ -789,12 +791,15 @@ function commandReviewList(global, options) {
 
 function commandReviewStats(global, options) {
   const { runnablesPath } = resolvePaths({});
-  const stats = trackRecordStats(loadTrackRecordsFile(global.db, { runnablesPath }));
+  // One policy for both the rows and the table: `needed` answers "how far from
+  // unlocking here", so it has to be measured against the thresholds routing uses.
+  const policy = getTrackRecordPolicy();
+  const stats = trackRecordStats(loadTrackRecordsFile(global.db, { runnablesPath }), policy);
   if (options.json) {
     print(stats, true);
     return 0;
   }
-  process.stdout.write(`${formatTrackRecordTable(stats, getTrackRecordPolicy())}\n`);
+  process.stdout.write(`${formatTrackRecordTable(stats, policy)}\n`);
   return 0;
 }
 

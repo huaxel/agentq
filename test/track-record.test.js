@@ -15,13 +15,16 @@ const test = require('node:test');
 const {
   REVIEW_TIERS,
   REVIEW_VERDICTS,
+  REVIEWS_TO_UNLOCK_MAX_K,
   TRACK_RECORD_MIN_N,
   TRACK_RECORD_MIN_LOWER,
+  VERDICT_WEIGHTS,
   buildTrackRecords,
   eligibilityReason,
   keyResolver,
   qualifies,
   recordCell,
+  reviewsToUnlock,
   successesText,
   trackRecordFor,
   trackRecordPolicy,
@@ -259,6 +262,171 @@ test('stats flatten every record in a stable order', () => {
   assert.deepEqual(stats.records.map((row) => row.tier), ['small', 'medium', 'big']);
   assert.equal(stats.records[0].model, 'deepseek-v4-1-flash');
   assert.deepEqual(trackRecordStats(null), { count: 0, records: [] });
+});
+
+// --- Distance to unlock ---
+
+/**
+ * The same question answered by walking the cap instead of reasoning about it:
+ * the first k (0..REVIEWS_TO_UNLOCK_MAX_K) whose extra accepted reviews clear
+ * both thresholds. The tests pin a number and check it against this, so a
+ * change in the weighting or the bound shows up as a disagreement rather than
+ * a test that moved with the code.
+ *
+ * @param {{ n: number, accepted: number, withFixes: number, rejected: number }} record
+ * @param {{ minReviews: number, minLowerBound: number }} policy
+ * @returns {number|null}
+ */
+function expectedNeeded(record, policy) {
+  const successes = record.accepted * VERDICT_WEIGHTS.accepted
+    + record.withFixes * VERDICT_WEIGHTS['accepted-with-fixes']
+    + record.rejected * VERDICT_WEIGHTS.rejected;
+  for (let k = 0; k <= REVIEWS_TO_UNLOCK_MAX_K; k += 1) {
+    const n = record.n + k;
+    if (n >= policy.minReviews && wilsonLowerBound(successes + k, n) >= policy.minLowerBound) return k;
+  }
+  return null;
+}
+
+/** @param {Partial<{n: number, accepted: number, withFixes: number, rejected: number}>} [counts] */
+function unlockRecord(counts = {}) {
+  return { n: 0, accepted: 0, withFixes: 0, rejected: 0, ...counts };
+}
+
+test('the review-to-unlock distance is 0 for a record that already unlocks', () => {
+  const unlocked = unlockRecord({ n: 10, accepted: 10 });
+  const lowerBound = wilsonLowerBound(unlocked.accepted, unlocked.n);
+  assert.ok(qualifies({ ...unlocked, lowerBound }), 'the same record must be the one qualifies accepts');
+  assert.equal(reviewsToUnlock(unlocked, trackRecordPolicy(null)), 0);
+  // The default policy is trackRecordPolicy()'s defaults, so omitting it says the same.
+  assert.equal(reviewsToUnlock(unlocked), 0);
+});
+
+test('the review-to-unlock distance is the smallest k that clears both thresholds', () => {
+  const policy = trackRecordPolicy(null);
+  /** @type {Array<[string, { n: number, accepted: number, withFixes?: number, rejected?: number }, number]>} */
+  const cases = [
+    // Nothing recorded: 9 clean reviews, because the bound needs them before the count does.
+    ['no reviews yet', unlockRecord(), 9],
+    // 3/3 is a 0.438 bound; 9/9 is the first all-accepted sample at or over 0.70.
+    ['all accepted, bound is the gap', unlockRecord({ n: 3, accepted: 3 }), 6],
+    // 6/6 is 0.61: past minReviews, so only the bound is short.
+    ['all accepted, past minReviews', unlockRecord({ n: 6, accepted: 6 }), 3],
+    // 6 with-fixes verdicts are 3 successes: the long road.
+    ['with-fixes heavy', unlockRecord({ n: 6, withFixes: 6 }), 19],
+    // Fractional successes: 1 accepted + 3 with-fixes + 1 rejected is 2.5 of 5.
+    ['half successes', unlockRecord({ n: 5, accepted: 1, withFixes: 3, rejected: 1 }), 18],
+    // Rejections pull the bound down, so more clean reviews are needed.
+    ['accepted, fixed and rejected', unlockRecord({ n: 8, accepted: 5, withFixes: 1, rejected: 2 }), 15],
+  ];
+  for (const [name, record, k] of cases) {
+    assert.equal(reviewsToUnlock(record, policy), k, name);
+    assert.equal(expectedNeeded(record, policy), k, `${name}: the pinned number must match the walk`);
+  }
+});
+
+test('minReviews decides when the bound is already high but the sample is small', () => {
+  const record = unlockRecord({ n: 4, accepted: 4 });
+  const policy = { minReviews: 12, minLowerBound: 0.4 };
+  assert.ok(wilsonLowerBound(4, 4) >= policy.minLowerBound, 'the bound must already clear, so only n is short');
+  assert.equal(reviewsToUnlock(record, policy), 8);
+  assert.equal(expectedNeeded(record, policy), 8);
+});
+
+test('the review-to-unlock distance is null when nothing within the cap reaches it', () => {
+  assert.equal(REVIEWS_TO_UNLOCK_MAX_K, 100);
+  const tenOfTen = unlockRecord({ n: 10, accepted: 10 });
+  // A Wilson bound is always strictly below 1, so this threshold is unreachable.
+  assert.equal(reviewsToUnlock(tenOfTen, { minReviews: 5, minLowerBound: 1 }), null);
+  assert.equal(expectedNeeded(tenOfTen, { minReviews: 5, minLowerBound: 1 }), null);
+  // The count can be out of reach too, and the cap itself is inclusive.
+  assert.equal(reviewsToUnlock(unlockRecord(), { minReviews: 100, minLowerBound: 0.7 }), 100);
+  assert.equal(reviewsToUnlock(unlockRecord(), { minReviews: 101, minLowerBound: 0.7 }), null);
+});
+
+test('a record that is not a record has no distance to report', () => {
+  // Nothing to count from, or a negative sample that means nothing: null, not a number.
+  assert.equal(reviewsToUnlock(null), null);
+  assert.equal(reviewsToUnlock(undefined), null);
+  assert.equal(reviewsToUnlock('nonsense'), null);
+  assert.equal(reviewsToUnlock({ accepted: 1 }), null);
+  assert.equal(reviewsToUnlock({ n: NaN, accepted: 1 }), null);
+  assert.equal(reviewsToUnlock({ n: -3, accepted: 0 }), null);
+});
+
+test('fractional successes and unusable counts still answer the documented way', () => {
+  // 3 with-fixes verdicts are 1.5 successes: the bound is computed on the half.
+  const halves = unlockRecord({ n: 3, withFixes: 3 });
+  assert.equal(reviewsToUnlock(halves), expectedNeeded(halves, trackRecordPolicy(null)));
+  assert.ok(reviewsToUnlock(halves) > reviewsToUnlock(unlockRecord({ n: 3, accepted: 3 })), 'halves are further from unlocking');
+
+  // A count that is not a number reads as zero, so the successes fall to what is left.
+  const broken = { n: 3, accepted: 'three', withFixes: null, rejected: undefined };
+  assert.equal(reviewsToUnlock(broken), expectedNeeded(unlockRecord({ n: 3 }), trackRecordPolicy(null)));
+
+  // minReviews 0 and minLowerBound 0 are already cleared by an empty record.
+  assert.equal(reviewsToUnlock(unlockRecord(), { minReviews: 0, minLowerBound: 0 }), 0);
+});
+
+test('stats rows carry needed against the policy they were given', () => {
+  const record = {
+    n: 6, accepted: 6, withFixes: 0, rejected: 0, rate: 1, lowerBound: wilsonLowerBound(6, 6),
+  };
+  const records = new Map([['deepseek-v4-1-flash', new Map([['medium', record]])]]);
+
+  // The default policy, then a looser and a stricter one.
+  assert.equal(trackRecordStats(records).records[0].needed, 3);
+  assert.equal(trackRecordStats(records, { minReviews: 4, minLowerBound: 0.6 }).records[0].needed, 0);
+  assert.equal(trackRecordStats(records, { minReviews: 5, minLowerBound: 1 }).records[0].needed, null);
+
+  // No other row field moved, and the row shape is still the documented one.
+  const [row] = trackRecordStats(records).records;
+  assert.deepEqual(Object.keys(row), ['model', 'tier', 'n', 'accepted', 'withFixes', 'rejected', 'rate', 'lowerBound', 'needed']);
+  assert.deepEqual(
+    { ...row, needed: null },
+    { model: 'deepseek-v4-1-flash', tier: 'medium', ...record, needed: null },
+  );
+});
+
+test('needed says 0 exactly when the record unlocks, for every threshold that can be met', () => {
+  // The `unlock` column and the `needed` column answer the same question, so they
+  // must agree: 0 more reviews is the same fact as "yes, this unlocks".
+  /** @type {Array<{ accepted: number, withFixes: number, rejected: number }>} */
+  const shapes = [
+    { accepted: 0, withFixes: 0, rejected: 0 },
+    { accepted: 1, withFixes: 0, rejected: 0 },
+    { accepted: 2, withFixes: 3, rejected: 1 },
+    { accepted: 9, withFixes: 0, rejected: 0 },
+    { accepted: 6, withFixes: 6, rejected: 0 },
+    { accepted: 0, withFixes: 4, rejected: 4 },
+  ];
+  const policies = [
+    trackRecordPolicy(null),
+    { minReviews: 0, minLowerBound: 0 },
+    { minReviews: 3, minLowerBound: 0.6 },
+    { minReviews: 12, minLowerBound: 0.4 },
+    { minReviews: 5, minLowerBound: 1 },
+  ];
+  for (const shape of shapes) {
+    const reviews = [
+      ...Array.from({ length: shape.accepted }, () => review({ tier: 'big' })),
+      ...Array.from({ length: shape.withFixes }, () => review({ tier: 'big', verdict: 'accepted-with-fixes' })),
+      ...Array.from({ length: shape.rejected }, () => review({ tier: 'big', verdict: 'rejected' })),
+    ];
+    const rows = trackRecordStats(buildTrackRecords({ reviews, runnables: RUNNABLES }), policies[0]).records;
+    if (!reviews.length) {
+      assert.deepEqual(rows, [], 'a shape with no reviews records nothing');
+      continue;
+    }
+    for (const policy of policies) {
+      const row = rows.find((candidate) => candidate.tier === 'big');
+      assert.equal(
+        reviewsToUnlock(row, policy) === 0,
+        qualifies(row, policy),
+        `${JSON.stringify(shape)} at ${JSON.stringify(policy)}`,
+      );
+    }
+  }
 });
 
 // --- Routing: the one effect a record has ---

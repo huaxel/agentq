@@ -937,6 +937,17 @@ explained in its reasons (`track record 4/5 at big`). `pick` prints the record
 as a `record` column (`5/6`, or `—`), `agentq review stats` prints the full
 table, and the `track_records` MCP tool returns the same rows as JSON.
 
+`review stats` and `track_records` also report `needed`: how many more accepted
+reviews would clear both thresholds, counted one review at a time from the
+record as it stands (`src/core/track-record.js:reviewsToUnlock`). `0` means the
+record already unlocks, and `—` (JSON `null`) means nothing within the next 100
+reviews does — the cap is `REVIEWS_TO_UNLOCK_MAX_K`, and a `minLowerBound` of 1
+always lands there, because a Wilson bound never reaches 1. It is a distance to *these* thresholds, so both readers measure it with the
+policy they route with: the CLI's effective `trackRecord` config, and the MCP
+server's own (its host supplies it through the same snapshot core that routing
+reads, falling back to the defaults when it cannot). It is informational:
+routing never reads it.
+
 Reviews live in the queue database (`reviews` table), so they travel with the
 queue. A missing database or a database from before the table existed means no
 records, never an error — routing then behaves exactly as it did before.

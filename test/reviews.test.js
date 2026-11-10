@@ -272,11 +272,31 @@ test('agentq review add, list and stats work against the queue', () => {
     assert.equal(medium.model, 'deepseek-v4-1-flash');
     assert.equal(medium.n, 2);
     assert.equal(medium.lowerBound, wilsonLowerBound(2, 2));
+    // 2 of 2 needs 9 reviews before the bound reaches 0.70, so seven more.
+    assert.equal(medium.needed, 7);
+    assert.equal(parsed.records.find((row) => row.tier === 'small').needed, 7, 'the inherited row says the same');
 
     const text = runCli(dbPath, ['review', 'stats'], fixture.env());
     assert.equal(text.exitCode, 0, text.stderr);
     assert.match(text.stdout, /track records/);
     assert.match(text.stdout, /deepseek-v4-1-flash\s+medium/);
+    assert.match(text.stdout, /rate +lower +needed +unlock/);
+    assert.match(text.stdout, /deepseek-v4-1-flash\s+medium\s+2\s+2\s+0\s+0\s+1\.00\s+0\.34\s+7\s+no/);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an unknown review action names every command that does exist', () => {
+  const fixture = writeRoutingFixture();
+  const dbPath = path.join(fixture.root, 'data', 'orchestrator.sqlite');
+  try {
+    const result = runCli(dbPath, ['review', 'count'], fixture.env());
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /unknown review command: count/);
+    for (const action of ['add', 'amend', 'list', 'stats']) {
+      assert.match(result.stderr, new RegExp(`\\b${action}\\b`), `the message must name ${action}`);
+    }
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -601,10 +621,56 @@ test('review_task records into a real queue and track_records reads it back', ()
     const medium = stats.records.find((row) => row.tier === 'medium');
     assert.equal(medium.n, 1);
     assert.equal(medium.accepted, 1);
+    // No policy in these deps, so `needed` is measured against the defaults:
+    // 1 of 1 is a 0.21 bound, and 9 clean reviews are what clear 0.70.
+    assert.equal(medium.needed, 8);
   } finally {
     db.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('track_records measures needed against the policy the host routes with', () => {
+  const records = new Map([['deepseek-v4-1-flash', new Map([['medium', {
+    n: 2, accepted: 2, withFixes: 0, rejected: 0, rate: 1, lowerBound: wilsonLowerBound(2, 2),
+  }]])]]);
+  const needed = (policy) => {
+    const deps = {
+      getCatalog: () => [],
+      getCapacity: () => [],
+      recommend: () => ({}),
+      listTasks: () => [],
+      getTask: () => null,
+      getTrackRecords: () => records,
+      ...(policy ? { getTrackRecordPolicy: () => policy } : {}),
+    };
+    return tool(buildReadTools(deps), 'track_records').handler({}).records[0].needed;
+  };
+
+  // 2 of 2 is a 0.34 bound, so the default thresholds want 7 more clean reviews.
+  assert.equal(needed(null), 7);
+  // A bound the record already clears and a count it meets: nothing is needed.
+  assert.equal(needed({ minReviews: 2, minLowerBound: 0.3 }), 0);
+  // A stricter count lengthens the gap by exactly what it asks for.
+  assert.equal(needed({ minReviews: 12, minLowerBound: 0.3 }), 10);
+  // An unreachable bound is null, which the table shows as a dash.
+  assert.equal(needed({ minReviews: 5, minLowerBound: 1 }), null);
+});
+
+test('a host whose policy read fails still gets rows, measured against the defaults', () => {
+  const records = new Map([['deepseek-v4-1-flash', new Map([['medium', {
+    n: 2, accepted: 2, withFixes: 0, rejected: 0, rate: 1, lowerBound: wilsonLowerBound(2, 2),
+  }]])]]);
+  const deps = {
+    getCatalog: () => [],
+    getCapacity: () => [],
+    recommend: () => ({}),
+    listTasks: () => [],
+    getTask: () => null,
+    getTrackRecords: () => records,
+    getTrackRecordPolicy: () => { throw new Error('routing core not installed'); },
+  };
+  assert.equal(tool(buildReadTools(deps), 'track_records').handler({}).records[0].needed, 7);
 });
 
 test('track_records without an injected source is a clear tool error, not a crash', () => {

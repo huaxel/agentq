@@ -11,7 +11,7 @@
 
 const path = require('node:path');
 const { capacityFor } = require('../../core/capacity.js');
-const { recordCell } = require('../../core/track-record.js');
+const { recordCell, reviewsToUnlock } = require('../../core/track-record.js');
 const { formatCost: formatPrice, formatDollars } = require('../../lib/path-prices.js');
 
 /**
@@ -218,10 +218,12 @@ function formatOptionsTable(options = [], { title = 'options' } = {}) {
  * The track records as a table: one row per (model key, tier).
  *
  * `rate` is the weighted acceptance rate (with-fixes counts half), `lower` is
- * the Wilson 95% bound the unlock thresholds compare against, and `unlock`
- * says whether this record would make an unscored model at this tier eligible.
+ * the Wilson 95% bound the unlock thresholds compare against, `needed` is how
+ * many more accepted reviews would clear both thresholds (0 already unlocks,
+ * `—` is out of reach), and `unlock` says whether this record would make an
+ * unscored model at this tier eligible.
  *
- * @param {{ count: number, records: Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }> }} [stats]
+ * @param {{ count: number, records: Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number, needed?: number|null }> }} [stats]
  * @param {{ minReviews?: number, minLowerBound?: number }} [policy]
  * @returns {string}
  */
@@ -232,16 +234,23 @@ function formatTrackRecordTable(stats, { minReviews = 5, minLowerBound = 0.7 } =
   const lines = [
     'track records — outcome reviews, weighted (accepted 1, with-fixes 0.5, rejected 0)',
     '',
-    `  ${'model'.padEnd(width)} ${'tier'.padEnd(6)} ${'n'.padStart(3)} ${'ok'.padStart(4)} ${'fix'.padStart(4)} ${'no'.padStart(3)} ${'rate'.padStart(6)} ${'lower'.padStart(6)}  unlock`,
+    `  ${'model'.padEnd(width)} ${'tier'.padEnd(6)} ${'n'.padStart(3)} ${'ok'.padStart(4)} ${'fix'.padStart(4)} ${'no'.padStart(3)} ${'rate'.padStart(6)} ${'lower'.padStart(6)} ${'needed'.padStart(6)}  unlock`,
   ];
   for (const record of records) {
     const unlock = record.n >= minReviews && record.lowerBound >= minLowerBound ? 'yes' : 'no';
+    // The row is authoritative; a row built without `needed` gets measured
+    // against the same policy the `unlock` column uses.
+    const needed = Number.isFinite(record.needed)
+      ? record.needed
+      : reviewsToUnlock(record, { minReviews, minLowerBound });
+    const neededCell = String(needed ?? '—').padStart(6);
     lines.push(
       `  ${record.model.padEnd(width)} ${record.tier.padEnd(6)} ${String(record.n).padStart(3)} `
       + `${String(record.accepted).padStart(4)} ${String(record.withFixes).padStart(4)} ${String(record.rejected).padStart(3)} `
-      + `${record.rate.toFixed(2).padStart(6)} ${record.lowerBound.toFixed(2).padStart(6)}  ${unlock}`,
+      + `${record.rate.toFixed(2).padStart(6)} ${record.lowerBound.toFixed(2).padStart(6)} ${neededCell}  ${unlock}`,
     );
   }
+  lines.push('', '  needed — further accepted reviews to clear both thresholds (0 already unlocks, — is out of reach)');
   return lines.join('\n');
 }
 

@@ -51,6 +51,14 @@ const TRACK_RECORD_MIN_N = 5;
 /** Wilson lower bound a record must reach before it can unlock an unscored model. */
 const TRACK_RECORD_MIN_LOWER = 0.7;
 
+/**
+ * How many further accepted reviews `reviewsToUnlock` will look at. Beyond the
+ * cap a record is reported as unreachable (`null`) rather than as needing an
+ * exact number nobody would believe: a Wilson bound is always below 1 for a
+ * finite sample, so `minLowerBound: 1` has no answer at any k.
+ */
+const REVIEWS_TO_UNLOCK_MAX_K = 100;
+
 /** Two-sided 95% z-score for the Wilson interval. */
 const WILSON_Z = 1.96;
 
@@ -100,6 +108,21 @@ function wilsonLowerBound(successes, n, z = WILSON_Z) {
  */
 function verdictWeight(verdict) {
   return Object.hasOwn(VERDICT_WEIGHTS, verdict) ? VERDICT_WEIGHTS[verdict] : null;
+}
+
+/**
+ * Weighted successes already on a record, from the same VERDICT_WEIGHTS the
+ * fold uses — so a count and a bound never disagree about what a review is
+ * worth.
+ *
+ * @param {{ accepted?: number, withFixes?: number, rejected?: number }|null|undefined} record
+ * @returns {number} 0 for a record with nothing on it.
+ */
+function recordSuccesses(record) {
+  const count = (value) => (Number.isFinite(value) ? value : 0);
+  return count(record && record.accepted) * VERDICT_WEIGHTS.accepted
+    + count(record && record.withFixes) * VERDICT_WEIGHTS['accepted-with-fixes']
+    + count(record && record.rejected) * VERDICT_WEIGHTS.rejected;
 }
 
 /**
@@ -203,7 +226,7 @@ function buildTrackRecords({ reviews = [], verifyOutcomes = [], runnables = [] }
     for (const [tier, bucket] of byTier) {
       const n = bucket.accepted + bucket.withFixes + bucket.rejected;
       if (n === 0) continue;
-      const successes = bucket.accepted + bucket.withFixes * 0.5;
+      const successes = recordSuccesses(bucket);
       tiers.set(tier, {
         n,
         accepted: bucket.accepted,
@@ -247,6 +270,21 @@ function trackRecordPolicy(config) {
   const raw = config && typeof config === 'object' && config.trackRecord && typeof config.trackRecord === 'object'
     ? config.trackRecord
     : {};
+  return policyThresholds(raw);
+}
+
+/**
+ * The two thresholds, read off a policy object (or a partial one, or nothing).
+ *
+ * The same fallbacks as `trackRecordPolicy`, applied to the policy shape that
+ * function returns rather than the config that feeds it: an interface that
+ * already holds a policy can hand it straight to `reviewsToUnlock`.
+ *
+ * @param {{ minReviews?: number, minLowerBound?: number }|null|undefined} policy
+ * @returns {{ minReviews: number, minLowerBound: number }}
+ */
+function policyThresholds(policy) {
+  const raw = policy && typeof policy === 'object' ? policy : {};
   const minReviews = Number.isFinite(raw.minReviews) && raw.minReviews >= 0
     ? Math.floor(raw.minReviews)
     : TRACK_RECORD_MIN_N;
@@ -269,6 +307,37 @@ function qualifies(record, { minReviews = TRACK_RECORD_MIN_N, minLowerBound = TR
 }
 
 /**
+ * How many more accepted reviews a record needs before it unlocks its model.
+ *
+ * The distance the stats table otherwise leaves to the reader: the smallest
+ * k ≥ 0 such that, once k more accepted reviews (weight 1 each) are on the
+ * record, both thresholds clear — `n + k >= minReviews` and
+ * `wilsonLowerBound(successes + k, n + k) >= minLowerBound`. Informational
+ * only: routing never reads it.
+ *
+ * @param {{ n?: number, accepted?: number, withFixes?: number, rejected?: number }|null|undefined} record
+ *   A record as `buildTrackRecords` builds one: `n` is the observation count and
+ *   the verdict counts add up to it. A missing or non-numeric verdict count reads
+ *   as zero, and a record with no usable `n` (or a negative one) has no distance
+ *   to report, so it returns null rather than inventing one.
+ * @param {{ minReviews?: number, minLowerBound?: number }} [policy] Defaults to `trackRecordPolicy()`'s thresholds.
+ * @returns {number|null} 0 when the record already clears both thresholds, the
+ *   number of clean reviews still needed, or null when nothing within
+ *   REVIEWS_TO_UNLOCK_MAX_K gets there.
+ */
+function reviewsToUnlock(record, policy) {
+  const { minReviews, minLowerBound } = policyThresholds(policy);
+  if (!record || typeof record !== 'object') return null;
+  if (!Number.isFinite(record.n) || record.n < 0) return null;
+  const successes = recordSuccesses(record);
+  for (let k = 0; k <= REVIEWS_TO_UNLOCK_MAX_K; k += 1) {
+    const n = record.n + k;
+    if (n >= minReviews && wilsonLowerBound(successes + k, n) >= minLowerBound) return k;
+  }
+  return null;
+}
+
+/**
  * Weighted successes as text: `6` for whole numbers, `3.5` when a
  * with-fixes verdict contributes half.
  *
@@ -276,7 +345,7 @@ function qualifies(record, { minReviews = TRACK_RECORD_MIN_N, minLowerBound = TR
  * @returns {string}
  */
 function successesText(record) {
-  const successes = record.accepted + record.withFixes * 0.5;
+  const successes = recordSuccesses(record);
   return Number.isInteger(successes) ? String(successes) : successes.toFixed(1);
 }
 
@@ -321,10 +390,13 @@ function recordCell(record) {
  * and the `track_records` MCP tool both return.
  *
  * @param {Map<string, Map<string, any>>|null|undefined} trackRecords
- * @returns {{ count: number, records: Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }> }}
+ * @param {{ minReviews?: number, minLowerBound?: number }} [policy] The thresholds to measure the gap against;
+ *   defaults to `trackRecordPolicy()`'s. Callers should pass the policy they route with, so `needed` means
+ *   "to unlock here".
+ * @returns {{ count: number, records: Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number, needed: number|null }> }}
  */
-function trackRecordStats(trackRecords) {
-  /** @type {Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }>} */
+function trackRecordStats(trackRecords, policy = trackRecordPolicy()) {
+  /** @type {Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number, needed: number|null }>} */
   const records = [];
   if (trackRecords instanceof Map) {
     for (const [model, byTier] of trackRecords) {
@@ -340,6 +412,7 @@ function trackRecordStats(trackRecords) {
           rejected: record.rejected,
           rate: record.rate,
           lowerBound: record.lowerBound,
+          needed: reviewsToUnlock(record, policy),
         });
       }
     }
@@ -360,14 +433,18 @@ module.exports = {
   VERIFY_OUTCOME_TIER,
   TRACK_RECORD_MIN_N,
   TRACK_RECORD_MIN_LOWER,
+  REVIEWS_TO_UNLOCK_MAX_K,
   WILSON_Z,
   TIERS_COUNTED_FOR,
   wilsonLowerBound,
   verdictWeight,
+  recordSuccesses,
   keyResolver,
   buildTrackRecords,
   trackRecordFor,
   trackRecordPolicy,
+  policyThresholds,
+  reviewsToUnlock,
   qualifies,
   successesText,
   trackRecordReason,

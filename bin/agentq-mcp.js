@@ -118,6 +118,9 @@ const CORE_SOURCES = {
   recommend: ['src/core/snapshot.js'],
   // Quota path resolution for the stale-quota refresher.
   resolvePaths: ['src/core/snapshot.js'],
+  // The unlock thresholds, so track_records measures `needed` against the same
+  // policy `recommend` loads inside the core.
+  getTrackRecordPolicy: ['src/core/snapshot.js'],
 };
 
 /** @type {import('node:sqlite').DatabaseSync | null} */
@@ -260,6 +263,9 @@ const deps = {
   recommend: recommendWithHealth,
   getPathHealth: () => pathHealthStore().loadPathHealth(taskDbHandle()),
   getTrackRecords: () => trackRecordStore().loadTrackRecords(taskDbHandle()),
+  // The policy routing uses: `recommend` loads it from the effective ROI config
+  // inside the core, and this is that same call.
+  getTrackRecordPolicy: () => coreFunction('getTrackRecordPolicy')(),
   listTasks: (options) => withTaskDb((db) => taskStore().listTasks(db, options)),
   getTask: (id) => withTaskDb((db) => taskStore().getTask(db, id)),
 };

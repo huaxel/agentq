@@ -648,6 +648,35 @@ test('bin/agentq-mcp.js reads a real database opened read-only, without schema i
   }
 });
 
+test('bin/agentq-mcp.js measures track_records needed against its own roi config', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentq-mcp-records-'));
+  const dbPath = path.join(dir, 'orchestrator.sqlite');
+  const { openDb, initSchema, addReview } = require('../src/queue/db.js');
+  const writer = openDb(dbPath);
+  initSchema(writer);
+  for (let index = 0; index < 2; index += 1) {
+    addReview(writer, { model: 'mistral/deepseek-v4-flash-1017', tier: 'medium', verdict: 'accepted' });
+  }
+  writer.close();
+  // The thresholds this server routes with, straight from its own config file.
+  const roiConfigPath = path.join(dir, 'roi.config.json');
+  fs.writeFileSync(roiConfigPath, JSON.stringify({ trackRecord: { minReviews: 3, minLowerBound: 0.6 } }));
+  try {
+    const { lines } = await runServer([
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'track_records', arguments: {} } },
+    ], { env: { AGENTQ_ORCHESTRATOR_DB: dbPath, AGENTQ_ROI_CONFIG: roiConfigPath } });
+    const [, records] = lines.map((line) => JSON.parse(line));
+    assert.equal(records.result.isError, undefined, JSON.stringify(records.result));
+    const medium = records.result.structuredContent.records.find((row) => row.tier === 'medium');
+    assert.equal(medium.n, 2);
+    // Not the defaults: with a 0.6 bound, 4 more reach 6 of 6 (0.61) and clear minReviews 3.
+    assert.equal(medium.needed, 4);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('bin/agentq-mcp.js --help prints usage and exits zero', async () => {
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BIN, '--help'], { stdio: ['ignore', 'pipe', 'pipe'] });

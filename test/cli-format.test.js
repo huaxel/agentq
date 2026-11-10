@@ -13,9 +13,11 @@ const {
   formatGapReport,
   formatModelTable,
   formatOptionsTable,
+  formatTrackRecordTable,
   paceCell,
   pathCell,
 } = require('../src/interfaces/cli/format.js');
+const { buildTrackRecords, trackRecordStats } = require('../src/core/track-record.js');
 
 const CAPACITY = new Map([['go', { path: 'go', state: 'available', headroomPct: 90, resetsAt: null, observedAt: null, stale: false, reason: null }]]);
 
@@ -114,6 +116,39 @@ test('a long subscription name is elided to 24 characters', () => {
   assert.equal(name.length, 24);
   assert.equal(name, `${long.slice(0, 23)}…`);
   assert.match(cell, / \(codex\)$/);
+});
+
+// --- track records (W27) ---------------------------------------------------
+
+/** One record per tier, carrying `accepted` clean reviews at `small`. */
+function recordsWith(accepted) {
+  return buildTrackRecords({
+    reviews: Array.from({ length: accepted }, () => ({
+      model: 'deepseek/deepseek-v4-flash',
+      tier: 'small',
+      verdict: 'accepted',
+      task_id: null,
+    })),
+  });
+}
+
+test('the track record table measures each row against its own policy', () => {
+  const lines = formatTrackRecordTable(trackRecordStats(recordsWith(6))).split('\n');
+  assert.match(lines[2], /^ {2}model +tier +n +ok +fix +no +rate +lower +needed {2}unlock$/);
+  // 6/6 is a 0.61 bound: 3 more clean reviews reach the 0.70 the default policy asks for.
+  assert.match(lines[3], /^ {2}deepseek-v4-flash small +6 +6 +0 +0 +1\.00 +0\.61 +3 {2}no$/);
+  assert.match(lines[5], /^ {2}needed — further accepted reviews to clear both thresholds/);
+});
+
+test('the needed column shows 0 for a record that unlocks and a dash for one that cannot', () => {
+  const unlocked = trackRecordStats(recordsWith(10));
+  assert.equal(unlocked.records[0].needed, 0);
+  assert.match(formatTrackRecordTable(unlocked), /1\.00 +0\.72 +0 {2}yes$/m);
+
+  // An unreachable threshold is a dash, not a number a reader would chase.
+  const hopeless = trackRecordStats(recordsWith(10), { minReviews: 5, minLowerBound: 1 });
+  assert.equal(hopeless.records[0].needed, null);
+  assert.match(formatTrackRecordTable(hopeless, { minReviews: 5, minLowerBound: 1 }), /1\.00 +0\.72 +— {2}no$/m);
 });
 
 // --- price-table gap report (W16) -------------------------------------------
