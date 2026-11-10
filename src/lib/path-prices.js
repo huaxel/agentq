@@ -174,8 +174,26 @@ function localMinutes(now, tz) {
 }
 
 /**
+ * The off-peak windows a config entry declares, or null when it declares none.
+ *
+ * `offPeakHours` is either one window object or a non-empty array of them (a
+ * provider with two off-peak blocks a day). Routing can be handed a config the
+ * validator never saw, so a non-object array entry is skipped rather than
+ * thrown on, and an empty array reads as no schedule.
+ *
+ * @param {unknown} schedule `config.paths[].offPeakHours`
+ * @returns {Array<Record<string, any>>|null}
+ */
+function offPeakWindows(schedule) {
+  if (isPlainObject(schedule)) return [schedule];
+  if (!Array.isArray(schedule)) return null;
+  return schedule.filter(isPlainObject);
+}
+
+/**
  * True when `now` falls inside the off-peak window. A window may wrap past
- * midnight (16:30 → 00:30), and the end is exclusive.
+ * midnight (16:30 → 00:30), and the end is exclusive. One window only: the
+ * caller ORs the windows of an `offPeakHours` list.
  *
  * @param {{ tz: string, start: string, end: string }} schedule
  * @param {number} now
@@ -342,10 +360,13 @@ function pathPrice({ subscriptions = null, quotaPath, modelKey: key, now, mix = 
   const fee = pathFee(subscriptions, quotaPath, now);
   const monthlyLimit = finiteOrNull(price.monthlyLimit);
   const allowanceScale = monthlyLimit !== null && monthlyLimit > 0 ? fee / monthlyLimit : null;
-  const schedule = isPlainObject(pathEntry.offPeakHours) ? pathEntry.offPeakHours : null;
+  // One window or a list of them: off-peak is active when ANY window
+  // contains `now`, and each window is read in its own `tz`.
+  const windows = offPeakWindows(pathEntry.offPeakHours);
+  const hasSchedule = windows !== null && windows.length > 0;
   const hasOffPeakPrices = isPlainObject(price.offPeak);
-  const offPeak = schedule !== null && hasOffPeakPrices && offPeakActive(schedule, now);
-  const peak = schedule !== null && hasOffPeakPrices ? !offPeak : null;
+  const offPeak = hasSchedule && hasOffPeakPrices && windows.some((window) => offPeakActive(window, now));
+  const peak = hasSchedule && hasOffPeakPrices ? !offPeak : null;
   const prices = priceSet(price, { offPeak });
   const free = price.free === true;
   const mixShares = mix && mix.mix ? mix.mix : null;
@@ -367,7 +388,7 @@ function pathPrice({ subscriptions = null, quotaPath, modelKey: key, now, mix = 
     reason: priceReason({
       costPerMTok,
       peak,
-      hasSchedule: schedule !== null,
+      hasSchedule,
       hasOffPeakPrices,
       prices,
       mix: mixShares,
@@ -470,22 +491,46 @@ function priceProblems(config) {
     }
     if (pathEntry.offPeakHours != null) {
       const schedule = pathEntry.offPeakHours;
-      if (!isPlainObject(schedule)) {
-        problems.push(`${label}: "offPeakHours" must be an object with tz, start and end`);
-      } else {
-        if (typeof schedule.tz !== 'string' || !schedule.tz.trim()) {
-          problems.push(`${label}: offPeakHours.tz must be a non-empty time zone name`);
-        } else if (!timeZoneKnown(schedule.tz)) {
-          problems.push(`${label}: offPeakHours.tz "${schedule.tz}" is not a known time zone`);
+      if (Array.isArray(schedule)) {
+        // A list of windows, each checked on its own. Overlaps are legal: two
+        // blocks may cover the same minutes without changing the result.
+        if (schedule.length === 0) {
+          problems.push(`${label}: "offPeakHours" must not be an empty array`);
+        } else {
+          schedule.forEach((window, windowIndex) => {
+            problems.push(...windowProblems(window, `${label}: offPeakHours[${windowIndex}]`));
+          });
         }
-        const start = parseClock(schedule.start);
-        const end = parseClock(schedule.end);
-        if (start === null) problems.push(`${label}: offPeakHours.start must be a HH:MM time`);
-        if (end === null) problems.push(`${label}: offPeakHours.end must be a HH:MM time`);
-        if (start !== null && start === end) problems.push(`${label}: offPeakHours.start and end must differ`);
+      } else if (isPlainObject(schedule)) {
+        problems.push(...windowProblems(schedule, `${label}: offPeakHours`));
+      } else {
+        problems.push(`${label}: "offPeakHours" must be an object with tz, start and end, or a non-empty array of them`);
       }
     }
   });
+  return problems;
+}
+
+/**
+ * The per-window rules, shared by the single-object and array forms.
+ *
+ * @param {unknown} window
+ * @param {string} prefix message prefix naming the window, e.g. `paths[0] (go): offPeakHours[1]`
+ * @returns {string[]}
+ */
+function windowProblems(window, prefix) {
+  if (!isPlainObject(window)) return [`${prefix} must be an object with tz, start and end`];
+  const problems = [];
+  if (typeof window.tz !== 'string' || !window.tz.trim()) {
+    problems.push(`${prefix}.tz must be a non-empty time zone name`);
+  } else if (!timeZoneKnown(window.tz)) {
+    problems.push(`${prefix}.tz "${window.tz}" is not a known time zone`);
+  }
+  const start = parseClock(window.start);
+  const end = parseClock(window.end);
+  if (start === null) problems.push(`${prefix}.start must be a HH:MM time`);
+  if (end === null) problems.push(`${prefix}.end must be a HH:MM time`);
+  if (start !== null && start === end) problems.push(`${prefix}.start and end must differ`);
   return problems;
 }
 
@@ -545,6 +590,7 @@ module.exports = {
   pathFee,
   parseClock,
   localMinutes,
+  offPeakWindows,
   offPeakActive,
   priceSet,
   mixCost,

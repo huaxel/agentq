@@ -625,7 +625,10 @@ Declare the subscription's list on the config path:
 {
   "id": "go",
   "fee": 10,
-  "offPeakHours": { "tz": "UTC", "start": "16:30", "end": "00:30" },
+  "offPeakHours": [
+    { "tz": "UTC", "start": "01:00", "end": "04:00" },
+    { "tz": "UTC", "start": "06:00", "end": "10:00" }
+  ],
   "prices": {
     "atlas-flash": {
       "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": null,
@@ -665,10 +668,15 @@ are two payments for the same allowance.
 
 `offPeakHours` sits on the same path entry and is optional. Without it the peak
 price always applies and the reason says `peak price (no off-peak schedule)`.
-A window may wrap past midnight (`16:30` → `00:30`), the end is exclusive, and
-`tz` is an IANA zone name or `UTC`. A malformed schedule, a negative price, a
-non-positive `monthlyLimit` or a malformed `until` is a config error; a price
-key the path's coverage does not list is a warning (`"*"` covers all).
+It is either one window object, `{ "tz", "start", "end" }`, or a non-empty
+array of them — a provider with several off-peak blocks a day, like OpenCode Go
+above, lists each block and off-peak is active when **any** window contains
+`now`. Each window carries its own `tz`, may wrap past midnight (`16:30` →
+`00:30`), and its end is exclusive. Overlapping windows are allowed. An empty
+array is an error, and so is a malformed window (unknown zone, bad time, equal
+start and end). A negative price, a non-positive `monthlyLimit` or a malformed
+`until` is a config error too; a price key the path's coverage does not list is
+a warning (`"*"` covers all).
 
 **Precedence.** `path-price` wins, then the registry/ROI price (`roi`), then an
 AA list price (`aa-price`). `costSource` says which one applied, and only

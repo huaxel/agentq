@@ -172,16 +172,27 @@ fee-based allowance is not priced by a list price alone. Each entry:
 | `until` | `YYYY-MM-DD` | From that date the model is rejected (`free tier ended <date>` when `free`, else `price entry expired <date>`). |
 | `dataSharing` | boolean | The provider may retain prompts; `agentq pick --private` excludes it. |
 
-`config.paths[].offPeakHours` is optional and belongs to the same entry:
-`{ "tz": "UTC", "start": "16:30", "end": "00:30" }`. `tz` is an IANA zone
-name or `UTC`, the times are 24-hour `HH:MM`, the end is exclusive, and the
-window may wrap past midnight. Without it the peak price always applies.
+`config.paths[].offPeakHours` is optional and belongs to the same entry. It is
+one window, `{ "tz": "UTC", "start": "16:30", "end": "00:30" }`, or a non-empty
+array of windows, for a provider with several off-peak blocks a day:
+
+```json
+"offPeakHours": [
+  { "tz": "UTC", "start": "01:00", "end": "04:00" },
+  { "tz": "UTC", "start": "06:00", "end": "10:00" }
+]
+```
+
+Off-peak is active when **any** window contains `now`, and each window has its
+own `tz`. `tz` is an IANA zone name or `UTC`, the times are 24-hour `HH:MM`, the
+end is exclusive, and a window may wrap past midnight. Overlapping windows are
+allowed. Without a schedule the peak price always applies.
 
 Validation errors: a wrong type, a negative price, a non-positive
-`monthlyLimit`, a malformed `offPeakHours` (unknown zone, bad time, equal start
-and end) and a malformed `until`. Warning: a price key the path's coverage does
-not list (`"*"` covers all). The formula, precedence and the observed token mix
-are in [agentq.md](agentq.md#subscription-prices).
+`monthlyLimit`, a malformed `offPeakHours` (an empty array, unknown zone, bad
+time, equal start and end) and a malformed `until`. Warning: a price key the
+path's coverage does not list (`"*"` covers all). The formula, precedence and
+the observed token mix are in [agentq.md](agentq.md#subscription-prices).
 
 A home that still carries the old per-subscription registry columns (`onLocal`,
 `onGo`, `onCodex`, `onClaudeMax`, `onOpenRouter`, …) and `paths[].availKey` is

@@ -114,6 +114,28 @@ test('a valid price table validates clean, and an uncovered key only warns', () 
   ]);
 });
 
+test('offPeakHours accepts several windows, and an empty list fails validation', () => {
+  const windows = [
+    { tz: 'UTC', start: '01:00', end: '04:00' },
+    { tz: 'UTC', start: '06:00', end: '10:00' },
+  ];
+  const config = withPrices({
+    'example-codex': { input: 0.15, output: 0.6, cacheRead: 0.003, monthlyLimit: 100 },
+  }, { offPeakHours: windows });
+  assert.deepEqual(configProblems(config), []);
+
+  const empty = withPrices({
+    'example-codex': { input: 0.15, output: 0.6, cacheRead: 0.003, monthlyLimit: 100 },
+  }, { offPeakHours: [] });
+  assert.ok(configProblems(empty).some((p) => /"offPeakHours" must not be an empty array/.test(p)));
+
+  const malformed = withPrices({
+    'example-codex': { input: 0.15, output: 0.6, cacheRead: 0.003, monthlyLimit: 100 },
+  }, { offPeakHours: [windows[0], { tz: 'Nowhere/Nothing', start: '06:00', end: '10:00' }] });
+  assert.ok(configProblems(malformed)
+    .some((p) => /offPeakHours\[1\]\.tz "Nowhere\/Nothing" is not a known time zone/.test(p)));
+});
+
 test('the synthetic fixture home config validates clean', () => {
   // The fixture home carries only the setup; the method defaults supply the
   // scorer's tables, so the effective config is what must validate.

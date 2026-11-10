@@ -11,6 +11,7 @@ const {
   pathPrice,
   pathFee,
   offPeakActive,
+  offPeakWindows,
   parseClock,
   localMinutes,
   priceSet,
@@ -150,6 +151,83 @@ test('the schedule is read in its own time zone', () => {
   assert.equal(parseClock('00:30'), 30);
   assert.equal(parseClock('24:00'), null);
   assert.equal(parseClock('9:05'), null);
+});
+
+/** OpenCode Go's two daily off-peak blocks, both UTC. */
+const GO_WINDOWS = [
+  { tz: 'UTC', start: '01:00', end: '04:00' },
+  { tz: 'UTC', start: '06:00', end: '10:00' },
+];
+
+/** Price `atlas-flash` on the `go` path with the given schedule at `iso`. */
+function pricedAt(offPeakHours, iso) {
+  return pathPrice({
+    subscriptions: subscriptions({ offPeakHours }),
+    quotaPath: 'go',
+    modelKey: 'atlas-flash',
+    now: Date.parse(iso),
+    mix: observed(MIX),
+  });
+}
+
+test('an array of windows is off-peak inside any window and peak between them', () => {
+  // 02:30 is inside 01:00–04:00, 08:00 inside 06:00–10:00, 05:00 in the gap.
+  const first = pricedAt(GO_WINDOWS, '2026-11-08T02:30:00Z');
+  const second = pricedAt(GO_WINDOWS, '2026-11-08T08:00:00Z');
+  const between = pricedAt(GO_WINDOWS, '2026-11-08T05:00:00Z');
+  assert.equal(first.peak, false);
+  assert.equal(second.peak, false);
+  assert.equal(between.peak, true);
+  assert.match(first.reason, /path price, off-peak,/);
+  assert.match(second.reason, /path price, off-peak,/);
+  assert.match(between.reason, /path price, peak,/);
+  assert.ok(Math.abs(first.costPerMTok - 0.000608385) < 1e-9, String(first.costPerMTok));
+  assert.ok(Math.abs(between.costPerMTok - 0.00121677) < 1e-9, String(between.costPerMTok));
+  // Each window keeps the single-window boundaries: start inclusive, end exclusive.
+  assert.equal(pricedAt(GO_WINDOWS, '2026-11-08T01:00:00Z').peak, false);
+  assert.equal(pricedAt(GO_WINDOWS, '2026-11-08T04:00:00Z').peak, true);
+  assert.equal(pricedAt(GO_WINDOWS, '2026-11-08T06:00:00Z').peak, false);
+  assert.equal(pricedAt(GO_WINDOWS, '2026-11-08T10:00:00Z').peak, true);
+});
+
+test('a wrapping window works inside an array', () => {
+  const windows = [SCHEDULE, { tz: 'UTC', start: '06:00', end: '10:00' }];
+  // 00:15 is after midnight, still inside 16:30 → 00:30.
+  assert.equal(pricedAt(windows, '2026-11-08T00:15:00Z').peak, false);
+  assert.equal(pricedAt(windows, '2026-11-08T17:00:00Z').peak, false);
+  assert.equal(pricedAt(windows, '2026-11-08T08:00:00Z').peak, false);
+  assert.equal(pricedAt(windows, '2026-11-08T12:00:00Z').peak, true);
+  assert.equal(pricedAt(windows, '2026-11-08T00:30:00Z').peak, true, 'the wrapping end is exclusive');
+});
+
+test('each window of an array is read in its own time zone', () => {
+  const windows = [
+    { tz: 'UTC', start: '01:00', end: '04:00' },
+    { tz: 'Asia/Tokyo', start: '16:30', end: '00:30' },
+  ];
+  // 08:00 UTC is 17:00 in Tokyo: inside the Tokyo window, outside the UTC one.
+  assert.equal(pricedAt(windows, '2026-11-08T08:00:00Z').peak, false);
+  // 02:00 UTC is 11:00 in Tokyo: inside the UTC window, outside the Tokyo one.
+  assert.equal(pricedAt(windows, '2026-11-08T02:00:00Z').peak, false);
+  // 18:00 UTC is 03:00 next day in Tokyo: outside both (the Tokyo window is
+  // 16:30 → 00:30 local, i.e. 07:30 → 15:30 UTC).
+  assert.equal(pricedAt(windows, '2026-11-08T18:00:00Z').peak, true);
+});
+
+test('the single-object form is unchanged, and a one-element array matches it', () => {
+  assert.deepEqual(offPeakWindows(SCHEDULE), [SCHEDULE]);
+  assert.deepEqual(offPeakWindows([SCHEDULE]), [SCHEDULE]);
+  assert.equal(offPeakWindows(undefined), null);
+  assert.equal(offPeakWindows('night'), null);
+  for (const iso of ['2026-11-08T12:00:00Z', '2026-11-08T17:00:00Z', '2026-11-08T00:15:00Z']) {
+    const single = pricedAt(SCHEDULE, iso);
+    const listed = pricedAt([SCHEDULE], iso);
+    assert.equal(single.peak, listed.peak, iso);
+    assert.deepEqual(single.prices, listed.prices, iso);
+    assert.equal(single.reason, listed.reason, iso);
+  }
+  assert.equal(pricedAt(SCHEDULE, '2026-11-08T12:00:00Z').peak, true);
+  assert.equal(pricedAt(SCHEDULE, '2026-11-08T17:00:00Z').peak, false);
 });
 
 test('an unknown time zone reads as peak instead of throwing', () => {
@@ -384,6 +462,35 @@ test('a malformed prices block or offPeakHours is an error', () => {
     .some((p) => /offPeakHours\.tz must be a non-empty time zone name/.test(p)));
   assert.ok(priceProblems(config({ 'atlas-flash': PEAK }, { offPeakHours: 'night' }))
     .some((p) => /"offPeakHours" must be an object/.test(p)));
+});
+
+test('an empty offPeakHours array or a malformed window inside it is an error', () => {
+  assert.ok(priceProblems(config({ 'atlas-flash': PEAK }, { offPeakHours: [] }))
+    .some((p) => /"offPeakHours" must not be an empty array/.test(p)));
+
+  const bad = priceProblems(config({ 'atlas-flash': PEAK }, {
+    offPeakHours: [
+      { tz: 'UTC', start: '01:00', end: '04:00' },
+      { tz: 'Mars/Olympus', start: '06:00', end: '10:00' },
+      { tz: 'UTC', start: '25:00', end: '26:00' },
+      { tz: 'UTC', start: '06:00', end: '06:00' },
+      'night',
+    ],
+  }));
+  assert.ok(bad.some((p) => /offPeakHours\[1\]\.tz "Mars\/Olympus" is not a known time zone/.test(p)));
+  assert.ok(bad.some((p) => /offPeakHours\[2\]\.start must be a HH:MM time/.test(p)));
+  assert.ok(bad.some((p) => /offPeakHours\[2\]\.end must be a HH:MM time/.test(p)));
+  assert.ok(bad.some((p) => /offPeakHours\[3\]\.start and end must differ/.test(p)));
+  assert.ok(bad.some((p) => /offPeakHours\[4\] must be an object with tz, start and end/.test(p)));
+  assert.equal(bad.length, 5, bad.join('\n'));
+
+  // Overlapping windows are legal: two blocks may cover the same minutes.
+  assert.deepEqual(priceProblems(config({ 'atlas-flash': PEAK }, {
+    offPeakHours: [
+      { tz: 'UTC', start: '01:00', end: '04:00' },
+      { tz: 'UTC', start: '03:00', end: '06:00' },
+    ],
+  })), []);
 });
 
 test('a price key outside the path coverage is only a warning, and "*" covers all', () => {
