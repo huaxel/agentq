@@ -107,6 +107,14 @@ test('catalog joins ROI rows by modelKey and leaves unmatched entries unscored',
     calibration: null,
     costPerMTok: 0.12,
     costSource: 'roi',
+    // A `roi` cost is the pipeline's own blend, so the basis records the source
+    // and nothing else: no mix was applied to it.
+    costBasis: {
+      source: 'roi', mix: null, mixSource: null, mixTokens: null, peak: null, allowanceScale: null,
+    },
+    costReason: null,
+    priceExpired: null,
+    dataSharing: false,
     tier: 'Workhorse',
     speed: 90,
     scored: true,
@@ -390,4 +398,136 @@ test('a registry-pinned aaSlug decides the AA row for a runnable, not its key', 
   });
   assert.equal(catalog[0].aaIndex, 35.5, 'the pinned slug wins over the key match');
   assert.equal(catalog[0].intelligenceSource, 'aa-estimate');
+});
+
+// --- path prices (W16) ------------------------------------------------------
+
+const PRICE_NOW = Date.parse('2026-11-08T12:00:00Z');
+const PRICE_BLEND = { cache: 0.9174, input: 0.0781, output: 0.044 };
+
+/** A go path with its own price list and an active subscription. */
+function pricedSubscriptions(prices, extra = {}) {
+  return [{
+    id: 'go',
+    name: 'Orbit Go',
+    type: 'Wallet',
+    fee: 10,
+    startDate: '20260101',
+    models: ['atlas-flash'],
+    prices,
+    ...extra,
+  }];
+}
+
+const OBSERVED_ROWS = [
+  { model_key: 'atlas-flash', path_id: 'go', input: 600000, output: 240000, cache_write: 0, cache_read: 11160000 },
+];
+
+test('a path price beats the ROI price and carries its basis and reason', () => {
+  const { mixIndex } = require('../src/core/token-mix.js');
+  const [entry] = buildCatalog({
+    runnables: [{ id: 'opencode-go/atlas-flash', path: 'go', harness: 'pi', modelKey: 'atlas-flash' }],
+    roiModels: [{ model: 'acme/atlas-flash', genIntel: 50, mtok: 5 }],
+    subscriptions: pricedSubscriptions({
+      'atlas-flash': { input: 0.15, output: 0.6, cacheRead: 0.003, monthlyLimit: 100 },
+    }),
+    now: PRICE_NOW,
+    costBlend: PRICE_BLEND,
+    mixIndex: mixIndex(OBSERVED_ROWS),
+  });
+  assert.equal(entry.costSource, 'path-price');
+  assert.equal(entry.intelligence, 50, 'the ROI score still applies');
+  assert.equal(entry.costBasis.source, 'path-price');
+  assert.equal(entry.costBasis.mixSource, 'observed-path');
+  assert.equal(entry.costBasis.mixTokens, 12000000);
+  assert.equal(entry.costBasis.allowanceScale, 0.1);
+  assert.equal(entry.costBasis.peak, null);
+  assert.match(entry.costReason, /^cost \$/);
+  assert.equal(entry.priceExpired, null);
+  assert.equal(entry.dataSharing, false);
+  // The observed mix, not the global blend: cache reads dominate.
+  const shares = { cacheRead: 11160000 / 12000000, input: 600000 / 12000000, output: 240000 / 12000000 };
+  const expected = (shares.cacheRead * 0.003 + shares.input * 0.15 + shares.output * 0.6) * 0.1;
+  assert.ok(Math.abs(entry.costPerMTok - expected) < 1e-12, `${entry.costPerMTok} vs ${expected}`);
+});
+
+test('without a path price the ROI price wins over an AA price', () => {
+  const [entry] = buildCatalog({
+    runnables: [{ id: 'opencode-go/atlas-flash', path: 'go', harness: 'pi', modelKey: 'atlas-flash' }],
+    roiModels: [{ model: 'acme/atlas-flash', genIntel: 50, mtok: 5 }],
+    subscriptions: pricedSubscriptions({ 'atlas-ultra': { input: 1, output: 2 } }),
+    now: PRICE_NOW,
+    costBlend: PRICE_BLEND,
+    aaSnapshot: { models: [aaRow('atlas-flash', 30)] },
+    calibration: CALIBRATION,
+  });
+  assert.equal(entry.costSource, 'roi');
+  assert.equal(entry.costPerMTok, 5);
+  assert.equal(entry.costBasis.source, 'roi');
+  assert.equal(entry.costBasis.mix, null);
+});
+
+test('a path price applies to a model with no registry row and no AA price', () => {
+  const [entry] = buildCatalog({
+    runnables: [{ id: 'opencode-go/atlas-ultra', path: 'go', harness: 'pi', modelKey: 'atlas-ultra' }],
+    roiModels: [],
+    subscriptions: pricedSubscriptions({
+      'atlas-ultra': { input: 0.6, output: 2.4, cacheRead: 0.012, monthlyLimit: 15 },
+    }),
+    now: PRICE_NOW,
+    costBlend: PRICE_BLEND,
+  });
+  assert.equal(entry.intelligence, null);
+  assert.equal(entry.costSource, 'path-price');
+  assert.equal(entry.costBasis.mixSource, 'default', 'no observed rows falls back to the config blend');
+  assert.equal(entry.costBasis.allowanceScale, 10 / 15);
+  assert.ok(entry.costPerMTok > 0);
+});
+
+test('an AA price is blended with the observed mix, not the global blend', () => {
+  const { mixIndex } = require('../src/core/token-mix.js');
+  const prices = { price_1m_input_tokens: 0.6, price_1m_output_tokens: 1.8, price_1m_cache_hit_tokens: 0.11 };
+  const [entry] = buildCatalog({
+    runnables: [{ id: 'opencode-go/glm-5.3', path: 'go', harness: 'pi', modelKey: null }],
+    roiModels: [],
+    subscriptions: [{ id: 'go', type: 'Wallet', fee: 10, startDate: '20260101', models: ['*'] }],
+    now: PRICE_NOW,
+    aaSnapshot: { models: [{ slug: 'glm-5-3', pricing: prices, evaluations: { artificial_analysis_intelligence_index: 31.7 } }] },
+    calibration: CALIBRATION,
+    costBlend: PRICE_BLEND,
+    mixIndex: mixIndex([{
+      model_key: 'glm-5-3', path_id: 'go', input: 0, output: 0, cache_write: 0, cache_read: 2000000,
+    }]),
+  });
+  assert.equal(entry.costSource, 'aa-price');
+  assert.equal(entry.costBasis.mixSource, 'observed-path');
+  assert.ok(Math.abs(entry.costPerMTok - 0.11) < 1e-12, 'all-cache-read mix prices at the cache price');
+});
+
+test('a dataSharing price entry marks the catalog entry', () => {
+  const [entry] = buildCatalog({
+    runnables: [{ id: 'opencode-go/o-mini', path: 'go', harness: 'pi', modelKey: 'o-mini' }],
+    roiModels: [{ model: 'orbit/o-mini', genIntel: 40, mtok: 0.2 }],
+    subscriptions: pricedSubscriptions({
+      'o-mini': { input: 0.1, output: 0.4, cacheRead: 0.002, monthlyLimit: 15, dataSharing: true },
+    }),
+    now: PRICE_NOW,
+    costBlend: PRICE_BLEND,
+  });
+  assert.equal(entry.dataSharing, true);
+  assert.equal(entry.costSource, 'path-price');
+});
+
+test('an expired price entry is flagged for routing to reject', () => {
+  const [entry] = buildCatalog({
+    runnables: [{ id: 'opencode-go/atlas-mini', path: 'go', harness: 'pi', modelKey: 'atlas-mini' }],
+    roiModels: [{ model: 'acme/atlas-mini', genIntel: 40, mtok: 0.2 }],
+    subscriptions: pricedSubscriptions({
+      'atlas-mini': { input: 0.05, output: 0.2, cacheRead: 0.001, monthlyLimit: 15, free: true, until: '2026-11-01' },
+    }),
+    now: PRICE_NOW,
+    costBlend: PRICE_BLEND,
+  });
+  assert.equal(entry.priceExpired, 'free tier ended 2026-11-01');
+  assert.equal(entry.costPerMTok, 0, 'the entry is still priced for inspection');
 });

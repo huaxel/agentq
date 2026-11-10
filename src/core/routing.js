@@ -41,7 +41,9 @@ const DEGRADED_REASON_PREFIX = 'path degraded: ';
  * @property {number|null} aaIndex Exact AA Intelligence Index behind an estimate.
  * @property {{ n: number, r: number, rmse: number }|null} calibration
  * @property {number|null} costPerMTok
- * @property {'roi'|'aa-price'|null} costSource
+ * @property {'path-price'|'roi'|'aa-price'|null} costSource
+ * @property {import('./catalog.js').CostBasis|null} costBasis
+ * @property {boolean} dataSharing The price entry says the provider may retain prompts.
  * @property {import('./capacity.js').QuotaPace|null} pace
  * @property {number|null} quotaPressure
  * @property {number|null} effectiveCostPerMTok costPerMTok × quotaPressure, or costPerMTok
@@ -168,8 +170,11 @@ function compareChoices(a, b) {
  *   minIntelligence?: number,
  *   allowUnknownCapacity?: boolean,
  *   allowUnscored?: boolean,
+ *   excludeDataSharing?: boolean,
  *   pathHealth?: Map<string, { state: 'healthy'|'degraded', consecutive: number, lastFailureAt: string|null, reason: string|null }>|null,
  * }} [args]
+ *   `excludeDataSharing` is the private-work switch: a choice whose path price
+ *   entry says the provider may retain prompts is rejected outright.
  * @returns {{ choices: RankedChoice[], rejected: RankedChoice[], policy: { floor: number, order: string[] } }}
  */
 function rank({
@@ -179,6 +184,7 @@ function rank({
   minIntelligence,
   allowUnknownCapacity = false,
   allowUnscored = false,
+  excludeDataSharing = false,
   pathHealth = null,
 } = {}) {
   // Object.hasOwn, not `TIER_FLOORS[tier]`: a tier of 'constructor' or
@@ -207,6 +213,8 @@ function rank({
       calibration: entry.calibration ?? null,
       costPerMTok: numericOrNull(entry.costPerMTok),
       costSource: entry.costSource ?? null,
+      costBasis: entry.costBasis ?? null,
+      dataSharing: entry.dataSharing === true,
       pace: cap.pace ?? null,
       quotaPressure: numericOrNull(cap.quotaPressure),
       effectiveCostPerMTok: effectiveCost(entry.costPerMTok, cap.quotaPressure),
@@ -227,6 +235,24 @@ function rank({
         : sub.ids.length ? ` (${sub.ids.join(', ')})` : ` (no roi.config path funds ${entry.path})`;
       rejected.push({ ...item, reasons: [`subscription ${sub.state}${detail}`] });
       continue;
+    }
+
+    // A price entry's `until` date is a hard end, like a subscription's: the
+    // model is no longer sold on this path, so nothing may route to it.
+    if (typeof entry.priceExpired === 'string' && entry.priceExpired) {
+      rejected.push({ ...item, reasons: [entry.priceExpired] });
+      continue;
+    }
+
+    // Private work never lands on a provider that may retain prompts. The
+    // flag comes from the path's price entry, so it is a fact about the
+    // subscription, not a guess from the model name.
+    if (item.dataSharing) {
+      if (excludeDataSharing) {
+        rejected.push({ ...item, reasons: ['data sharing: excluded for private work'] });
+        continue;
+      }
+      item.reasons.push('data sharing: provider may retain prompts');
     }
 
     // An entry without a usable intelligence score cannot be floor-checked;
@@ -251,6 +277,11 @@ function rank({
       // An AA list price is not a measured ROI cost, so the reason says so.
       if (item.costSource === 'aa-price' && item.costPerMTok !== null) {
         item.reasons.push(`cost $${item.costPerMTok.toFixed(2)}/MTok (AA list price)`);
+      }
+      // A path price explains itself: the catalog built the sentence from the
+      // price set, the token mix and the allowance scale.
+      if (item.costSource === 'path-price' && typeof entry.costReason === 'string' && entry.costReason) {
+        item.reasons.push(entry.costReason);
       }
     }
 

@@ -736,8 +736,8 @@ test('bin/agentq-mcp.js --allow-write exposes the write tools and completes a cl
     const [, list, claim, wrongToken, enqueue] = lines.map((line) => JSON.parse(line));
 
     assert.deepEqual(list.result.tools.map((entry) => entry.name), [
-      'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'list_tasks', 'get_task',
-      'dispatch_status',
+      'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps',
+      'list_tasks', 'get_task', 'dispatch_status',
       'enqueue_task', 'claim_task', 'complete_task', 'dispatch_task',
     ]);
 

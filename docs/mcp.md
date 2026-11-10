@@ -90,14 +90,24 @@ task without write access.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `capacity_overview` | none | `generatedAt`, per-path capacity (`state`, `headroomPct`, `resetsAt`, `observedAt`, `stale`, `reason`), and `warnings` for every stale or unknown path. |
-| `list_models` | `min_intelligence` (number ≥ 0), `only_available` (boolean) | Catalog entries joined with the capacity state of the path each model runs on. A path with no capacity entry is reported as `unknown` and `stale`. `intelligenceSource` is `roi` for a measured score, `aa-estimate` for a conservative Artificial Analysis estimate (with `aaIndex` and `calibration: { n, r, rmse }`), and `null` when the model has no intelligence at all; `scored` is true only for a real score. |
-| `recommend_model` | `tier` (`small`\|`medium`\|`big`, default `medium`), `min_intelligence`, `allow_unknown_capacity` (default `false`), `verbose` (default `false`) | A shortlist of up to four `options` with their trade-offs: each option names the `roles` it plays (`cheapest`, `smartest`, `expiring`, `best-value`, `alternative`) plus its `pathName` (the name of the active subscription funding the path, else the path id), `intelligence`, `costPerMTok`, `effectiveCostPerMTok`, `pace`, `quotaPressure`, `headroomPct` and `resetsAt`; cost is adjusted by quota pace. `path` stays the quota path id, because dispatch, quota and health are keyed by it. The caller chooses and passes the chosen id to `dispatch_task` as `model`; `default` is what `"auto"` would pick. Also `rejectedCount` and `policy`. `verbose: true` adds the full ranked `choices` and the `rejected` candidates with reasons. Every choice carries `intelligenceSource`, `aaIndex` and `calibration`, and a reason built on an estimate reads `intelligence ≈53.9 (AA estimate, n=6, r=0.95)`. Advisory only. |
-| `recommend_for_task` | `id`, `tier` (default `medium`), `verbose` (default `false`) | Routing recommendation for one stored task. Model `auto` (or empty) returns the same shortlist shape as `recommend_model` (`mode: "routed"`). An explicit model returns its catalog entry, its path's capacity, `eligible`, and `reasons` (`mode: "explicit"`). |
+| `list_models` | `min_intelligence` (number ≥ 0), `only_available` (boolean) | Catalog entries joined with the capacity state of the path each model runs on. A path with no capacity entry is reported as `unknown` and `stale`. `intelligenceSource` is `roi` for a measured score, `aa-estimate` for a conservative Artificial Analysis estimate (with `aaIndex` and `calibration: { n, r, rmse }`), and `null` when the model has no intelligence at all; `scored` is true only for a real score. `costBasis` says which token mix and allowance scale produced a mix-derived cost, and `dataSharing` marks a path whose price entry says the provider may retain prompts. |
+| `recommend_model` | `tier` (`small`\|`medium`\|`big`, default `medium`), `min_intelligence`, `allow_unknown_capacity` (default `false`), `private` (default `false`), `verbose` (default `false`) | A shortlist of up to four `options` with their trade-offs: each option names the `roles` it plays (`cheapest`, `smartest`, `expiring`, `best-value`, `alternative`) plus its `pathName` (the name of the active subscription funding the path, else the path id), `intelligence`, `costPerMTok`, `effectiveCostPerMTok`, `pace`, `quotaPressure`, `headroomPct` and `resetsAt`; cost is adjusted by quota pace. `path` stays the quota path id, because dispatch, quota and health are keyed by it. The caller chooses and passes the chosen id to `dispatch_task` as `model`; `default` is what `"auto"` would pick. Also `rejectedCount` and `policy`. `verbose: true` adds the full ranked `choices` and the `rejected` candidates with reasons. Every choice carries `intelligenceSource`, `aaIndex` and `calibration`, and a reason built on an estimate reads `intelligence ≈53.9 (AA estimate, n=6, r=0.95)`. Advisory only. |
+| `recommend_for_task` | `id`, `tier` (default `medium`), `private` (default `false`), `verbose` (default `false`) | Routing recommendation for one stored task. Model `auto` (or empty) returns the same shortlist shape as `recommend_model` (`mode: "routed"`). An explicit model returns its catalog entry, its path's capacity, `eligible`, and `reasons` (`mode: "explicit"`). |
+| `path_gaps` | none | Price-table gap report per quota path: the priced models with no runnable on that path (cheapest first, with their computed cost) and the runnables whose model has no price entry, so they fall back to the ROI or AA price. |
 | `list_tasks` | `status`, `kind`, `limit` (default 20, max 100) | Summary rows only: `id`, `kind`, `status`, `repo`, `issue_num`, `model`, `priority`, `approval_state`, `created_at`, `attempts`. |
 | `get_task` | `id` | An explicit allowlist of task columns, with every user-influenced string confined to `untrusted_content`. `claim_token` is never returned. |
 | `dispatch_status` | `id` | The task's `status`, `slot_held` (a running dispatch claim or a live spawned worker occupies a slot), `worker_alive` (this server can see a live pid AND the task is still `running`), a `hint` when a slot is held without a visible worker, the worker this server dispatched for it (`pid`, `alive`, `model`, `started_at`, `log`), and the last 4 KB of its dispatch log under `untrusted_content`. A finished worker's record is reported once (with its final log tail) and then dropped; the log file stays on disk. `dispatched` is `null` when this server process never dispatched that task (including after a restart), while `slot_held` still reflects the queue. |
 
 `approval_state` is one of `not_required`, `pending`, `approved`, `rejected`.
+
+`private: true` on either recommend tool sets `excludeDataSharing`: a choice whose
+path price entry says the provider may retain prompts is rejected with
+`data sharing: excluded for private work`. Without it the choice stays eligible
+and its reason says `data sharing: provider may retain prompts`.
+
+`dispatch_task` never blocks an explicit caller model on `dataSharing` — the
+caller asked for it — but its `model-chosen` event records `dataSharing` so a
+later review can see what was sent where.
 
 `dispatch_task` records one `model-chosen` event per dispatch (`{ model, chosenBy, roles }`),
 where `chosenBy` is `caller`, `pinned` or `auto` and `roles` are the shortlist roles the
@@ -159,10 +169,12 @@ a fit:
 - `intelligenceSource: null` — no intelligence at all; `allowUnscored` is the
   only way routing will consider it.
 
-`costSource` says where `costPerMTok` came from: `roi` for the ROI pipeline's
-blended list price, `aa-price` for an Artificial Analysis list price used
-because the model has no registry row (only estimated entries get one, and it
-is blended with the same weights the pipeline uses). `null` means the cost is
+`costSource` says where `costPerMTok` came from: `path-price` for the
+subscription's own price list (`config.paths[].prices`, blended with the
+observed token mix and scaled by `fee / monthlyLimit`), `roi` for the ROI
+pipeline's blended list price, and `aa-price` for an Artificial Analysis list
+price used because the model has no registry row (only estimated entries get
+one, and it is blended with the observed token mix). `null` means the cost is
 unknown, which sorts the model last. A zero AA price is treated as unknown,
 never as free; a missing cache price falls back to the input price, since a
 model without prompt caching bills those tokens as input.
@@ -428,10 +440,11 @@ confirmation.
 ## Status
 
 - Read tools are wired to the orchestrator database and the routing core
-  adapter `src/core/snapshot.js` (`getCatalog`, `getCapacity`, `recommend`).
-  If that module is absent, `list_models`, `recommend_model`,
-  `recommend_for_task` (routed mode), and `capacity_overview` return the tool
-  error `routing core not installed`; the task tools work regardless.
+  adapter `src/core/snapshot.js` (`getCatalog`, `getCapacity`, `getPathGaps`,
+  `recommend`). If that module is absent, `list_models`, `recommend_model`,
+  `recommend_for_task` (routed mode), `path_gaps` and `capacity_overview`
+  return the tool error `routing core not installed`; the task tools work
+  regardless.
 - Write tools exist but are opt-in, and there is no approve/reject tool by
   design: approval stays a human action in the orchestrator.
 - `dispatch_task` starts a detached `agentq run --id` worker and never runs an

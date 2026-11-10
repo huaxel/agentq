@@ -17,7 +17,9 @@
 const fs = require('node:fs');
 const { modelKey } = require('../lib/model-key.js');
 const { aaListCost } = require('../lib/aa-pricing.js');
+const { pathPrice } = require('../lib/path-prices.js');
 const { activeSubscriptionNames, subscriptionStatus } = require('../lib/subscriptions.js');
+const { mixFor } = require('./token-mix.js');
 const {
   ESTIMATE_SOURCE,
   SCORE_SOURCE,
@@ -46,6 +48,18 @@ const defaultRunnablesFile = () => homeConfigPath('runnables.json');
  */
 
 /**
+ * @typedef {object} CostBasis
+ * @property {'path-price'|'aa-price'|'roi'} source Which price the cost came from.
+ * @property {{ cacheRead: number, cacheWrite: number, input: number, output: number }|null} mix
+ *   Token shares the price was blended with; null for a `roi` cost, which is the
+ *   pipeline's own blend and is carried through unchanged.
+ * @property {'observed-path'|'observed-model'|'default'|null} mixSource
+ * @property {number|null} mixTokens Tokens behind an observed mix, else null.
+ * @property {boolean|null} peak true = peak prices, false = off-peak, null = no schedule.
+ * @property {number|null} allowanceScale fee / monthlyLimit, or null for pay-per-token.
+ */
+
+/**
  * @typedef {object} CatalogEntry
  * @property {string} id
  * @property {string} path
@@ -55,8 +69,12 @@ const defaultRunnablesFile = () => homeConfigPath('runnables.json');
  * @property {'roi'|'aa-estimate'|null} intelligenceSource Where `intelligence` came from.
  * @property {number|null} aaIndex Exact AA Intelligence Index for this runnable, when known.
  * @property {{ n: number, r: number, rmse: number, snapshotVersion: string|null, generatedAt: string|null }|null} calibration Fit behind an estimate.
- * @property {number|null} costPerMTok ROI blended list price, or the AA list price for an estimate.
- * @property {'roi'|'aa-price'|null} costSource Where `costPerMTok` came from.
+ * @property {number|null} costPerMTok The path's own price, the ROI blended list price, or the AA list price.
+ * @property {'path-price'|'roi'|'aa-price'|null} costSource Where `costPerMTok` came from.
+ * @property {CostBasis|null} costBasis How a mix-derived cost was computed; null without a cost.
+ * @property {string|null} costReason The routing sentence for a path price.
+ * @property {string|null} priceExpired Rejection reason once the price entry's `until` has passed.
+ * @property {boolean} dataSharing The path's price entry says the provider may retain prompts.
  * @property {string|null} tier
  * @property {number|null} speed
  * @property {boolean} scored True only for a real ROI score (never for an estimate).
@@ -139,9 +157,13 @@ function finiteOrNull(value) {
  *   calibration?: import('./aa-estimate.js').Calibration|{ disabled: string }|null,
  *   registryRows?: Array<Record<string, any>>,
  *   costBlend?: { cache: number, input: number, output: number }|null,
+ *   mixIndex?: ReturnType<typeof import('./token-mix.js').mixIndex>|null,
  * }} [input]
  *   `subscriptions` is roi.config.json `paths`; when supplied, every entry
- *   carries the funding subscription's status for its quota path.
+ *   carries the funding subscription's status for its quota path, and a
+ *   `prices` table on a funding entry prices the model from the path's own
+ *   list. `mixIndex` is the observed token mix (src/core/token-mix.js); without
+ *   it every mix falls back to the global `costBlend`.
  * @returns {CatalogEntry[]}
  */
 function buildCatalog({
@@ -153,6 +175,7 @@ function buildCatalog({
   calibration = null,
   registryRows = [],
   costBlend = null,
+  mixIndex = null,
 } = {}) {
   /** @type {Map<string, Record<string, any>>} */
   const byKey = new Map();
@@ -189,6 +212,41 @@ function buildCatalog({
     const aaRow = aaIndex ? aaRowFor(aaIndex, aaSlug) : null;
     const aa = aaIndexFor(aaIndex, aaSlug);
     const roiCost = row ? finiteOrNull(row.mtok) : null;
+    // The mix is per (model, path): the same model on a subscription and on a
+    // metered path is used differently. It prices the path's own list and the
+    // AA list; the ROI pipeline's `mtok` is already a blend and stays as is.
+    const tokenMix = mixFor(mixIndex, { modelKey: key, path: runnable.path, costBlend });
+    const priced = pathPrice({
+      subscriptions,
+      quotaPath: runnable.path,
+      modelKey: key,
+      now,
+      mix: tokenMix,
+    });
+    // Precedence: the subscription's own price list, then the registry/ROI
+    // price, then an AA list price for a model the registry does not have. A
+    // path price that cannot be computed (no token mix at all) falls through
+    // rather than leaving the model unpriced.
+    const pathCost = priced ? priced.costPerMTok : null;
+    const costPerMTok = pathCost ?? roiCost;
+    const costSource = pathCost !== null ? 'path-price' : roiCost === null ? null : 'roi';
+    const costBasis = pathCost !== null
+      ? {
+        source: 'path-price',
+        mix: tokenMix.mix,
+        mixSource: tokenMix.mixSource,
+        mixTokens: tokenMix.mixTokens,
+        peak: priced ? priced.peak : null,
+        allowanceScale: priced ? priced.allowanceScale : null,
+      }
+      : roiCost === null ? null : {
+        source: 'roi',
+        mix: null,
+        mixSource: null,
+        mixTokens: null,
+        peak: null,
+        allowanceScale: null,
+      };
 
     const base = {
       id: runnable.id,
@@ -197,8 +255,12 @@ function buildCatalog({
       harness: runnable.harness,
       modelKey: runnable.modelKey ?? null,
       aaIndex: aa,
-      costPerMTok: roiCost,
-      costSource: roiCost === null ? null : 'roi',
+      costPerMTok,
+      costSource,
+      costBasis,
+      costReason: pathCost !== null && priced ? priced.reason : null,
+      priceExpired: priced ? priced.expiredReason : null,
+      dataSharing: priced ? priced.dataSharing : false,
       tier: row && typeof row.tierHobby === 'string' ? row.tierHobby : null,
       speed: row ? finiteOrNull(row.speed) : null,
       subscription,
@@ -225,15 +287,24 @@ function buildCatalog({
       };
     }
     // Only an estimated entry is priced from AA: an unscored model with no
-    // estimate is unroutable, so pricing it would buy nothing. A registry
-    // price always wins (base.costPerMTok above); AA fills the gap.
-    const aaCost = roiCost === null && aaRow ? aaListCost(aaRow, costBlend) : null;
+    // estimate is unroutable, so pricing it would buy nothing. A path price or
+    // a registry price always wins (base above); AA fills the gap, blended with
+    // the observed token mix.
+    const aaCost = costPerMTok === null && aaRow ? aaListCost(aaRow, tokenMix.mix) : null;
     return {
       ...base,
       intelligence: estimateValue,
       intelligenceSource: ESTIMATE_SOURCE,
-      costPerMTok: aaCost,
-      costSource: aaCost === null ? null : 'aa-price',
+      costPerMTok: aaCost ?? costPerMTok,
+      costSource: aaCost === null ? costSource : 'aa-price',
+      costBasis: aaCost === null ? costBasis : {
+        source: 'aa-price',
+        mix: tokenMix.mix,
+        mixSource: tokenMix.mixSource,
+        mixTokens: tokenMix.mixTokens,
+        peak: null,
+        allowanceScale: null,
+      },
       calibration: {
         n: usableCalibration.n,
         r: usableCalibration.r,

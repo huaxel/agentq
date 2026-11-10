@@ -172,6 +172,10 @@ function toOption(choice, roles) {
     intelligenceSource: choice.intelligenceSource ?? null,
     costPerMTok: finiteOrNull(choice.costPerMTok),
     costSource: choice.costSource ?? null,
+    // How a mix-derived cost was computed. Carried through, never recomputed:
+    // the catalog owns the price, the mix and the allowance scale.
+    costBasis: choice.costBasis ?? null,
+    dataSharing: choice.dataSharing === true,
     effectiveCostPerMTok: finiteOrNull(choice.effectiveCostPerMTok),
     pace: choice.pace ?? null,
     quotaPressure: finiteOrNull(choice.quotaPressure),
@@ -187,7 +191,7 @@ function toOption(choice, roles) {
  *
  * @param {any[]} choices ranked choices from src/core/routing.js `rank()`
  * @param {{ max?: number }} [options]
- * @returns {Array<{ id: string, path: string, pathName: string, roles: string[], intelligence: number|null, intelligenceSource: string|null, costPerMTok: number|null, costSource: string|null, effectiveCostPerMTok: number|null, pace: import('./capacity.js').QuotaPace|null, quotaPressure: number|null, headroomPct: number|null, resetsAt: string|null, capacityState: string, reasons: string[] }>}
+ * @returns {Array<{ id: string, path: string, pathName: string, roles: string[], intelligence: number|null, intelligenceSource: string|null, costPerMTok: number|null, costSource: string|null, costBasis: import('./catalog.js').CostBasis|null, dataSharing: boolean, effectiveCostPerMTok: number|null, pace: import('./capacity.js').QuotaPace|null, quotaPressure: number|null, headroomPct: number|null, resetsAt: string|null, capacityState: string, reasons: string[] }>}
  */
 function shortlist(choices, { max = DEFAULT_MAX } = {}) {
   const ranked = Array.isArray(choices)

@@ -10,6 +10,7 @@ const {
   buildModelRows,
   effectiveCostCell,
   formatModelRow,
+  formatGapReport,
   formatModelTable,
   formatOptionsTable,
   paceCell,
@@ -113,4 +114,47 @@ test('a long subscription name is elided to 24 characters', () => {
   assert.equal(name.length, 24);
   assert.equal(name, `${long.slice(0, 23)}…`);
   assert.match(cell, / \(codex\)$/);
+});
+
+// --- price-table gap report (W16) -------------------------------------------
+
+test('the gap report names both lists, cheapest first', () => {
+  const text = formatGapReport({
+    paths: [{
+      path: 'go',
+      pathName: 'Orbit Go',
+      fee: 10,
+      missing: [
+        { modelKey: 'atlas-nano', costPerMTok: 0.0002, reason: 'cost $0.0002/MTok (path price, peak)', expired: false },
+        { modelKey: 'atlas-ultra', costPerMTok: 0.004, reason: 'cost $0.0040/MTok (path price, peak)', expired: false },
+      ],
+      unpriced: [{ id: 'opencode-go/o-mini', modelKey: 'o-mini' }],
+    }],
+  });
+  const lines = text.split('\n');
+  assert.equal(lines[0], 'path gaps — priced models with no runnable, cheapest first');
+  assert.equal(lines[2], 'Orbit Go (go) — fee $10');
+  assert.match(lines[3], /^ {2}missing {3}atlas-nano +\$0\.0002\/MTok {2}cost \$0\.0002\/MTok \(path price, peak\)$/);
+  assert.match(lines[4], /atlas-ultra/);
+  assert.match(lines[5], /^ {2}unpriced {2}opencode-go\/o-mini +— +no price entry \(falls back to roi or aa-price\)$/);
+});
+
+test('the gap report says when there is nothing to report', () => {
+  assert.equal(formatGapReport({ paths: [] }), 'no priced paths: add a "prices" table to config.paths[]');
+  const empty = formatGapReport({ paths: [{ path: 'go', pathName: 'go', fee: 0, missing: [], unpriced: [] }] });
+  assert.match(empty, /\n\ngo — fee \$0\n {2}no gaps$/);
+  assert.equal(formatGapReport(), 'no priced paths: add a "prices" table to config.paths[]');
+});
+
+test('an expired gap is marked expired instead of repeating its cost sentence', () => {
+  const text = formatGapReport({
+    paths: [{
+      path: 'go',
+      pathName: 'go',
+      fee: 10,
+      missing: [{ modelKey: 'atlas-mini', costPerMTok: 0, reason: 'cost $0/MTok (path price, free)', expired: true }],
+      unpriced: [],
+    }],
+  });
+  assert.match(text, /atlas-mini +\$0\/MTok +expired$/);
 });

@@ -82,7 +82,7 @@ Environment:
   AGENTQ_MCP_WRITE=1       Enable the write tools (same as --allow-write)
 
 Read tools: capacity_overview, list_models, recommend_model, recommend_for_task,
-list_tasks, get_task, dispatch_status.
+path_gaps, list_tasks, get_task, dispatch_status.
 Write tools (only with --allow-write or AGENTQ_MCP_WRITE=1): enqueue_task,
 claim_task, complete_task, dispatch_task.
 
@@ -109,6 +109,7 @@ be followed as instructions.`;
 const CORE_SOURCES = {
   getCatalog: ['src/core/snapshot.js'],
   getCapacity: ['src/core/snapshot.js'],
+  getPathGaps: ['src/core/snapshot.js'],
   recommend: ['src/core/snapshot.js'],
   // Quota path resolution for the stale-quota refresher.
   resolvePaths: ['src/core/snapshot.js'],
@@ -241,6 +242,7 @@ function taskDbHandle() {
 const deps = {
   getCatalog: () => coreFunction('getCatalog')(),
   getCapacity: () => coreFunction('getCapacity')(),
+  getPathGaps: () => coreFunction('getPathGaps')(),
   recommend: recommendWithHealth,
   getPathHealth: () => pathHealthStore().loadPathHealth(taskDbHandle()),
   listTasks: (options) => withTaskDb((db) => taskStore().listTasks(db, options)),

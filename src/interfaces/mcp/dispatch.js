@@ -223,6 +223,7 @@ function summarizeRejections(rejected = [], limit = 3) {
  *
  * @param {string} model
  * @param {{ getCatalog: () => any[], getCapacity: () => any[], allowUnrouted?: boolean }} deps
+ * @returns {Record<string, any>} the catalog entry that was validated
  */
 function assertDispatchableModel(model, deps) {
   const catalog = deps.getCatalog();
@@ -243,7 +244,7 @@ function assertDispatchableModel(model, deps) {
       : 'subscription unknown (no funding data)';
     throw new Error(`model ${model} is not runnable: ${detail}`);
   }
-  if (deps.allowUnrouted) return;
+  if (deps.allowUnrouted) return entry;
 
   const capacity = deps.getCapacity();
   if (!Array.isArray(capacity)) throw new Error('capacity source returned a non-array value');
@@ -265,6 +266,7 @@ function assertDispatchableModel(model, deps) {
       `model ${model} is not dispatchable: ${reasons} (start the server with --dispatch-allow-unrouted to override)`,
     );
   }
+  return entry;
 }
 
 /**
@@ -293,18 +295,28 @@ function optionRoles(decision, model) {
  *   route through the routing core for the tier and take its `default`.
  * - An explicit caller model: validate it, and report the pin it replaces.
  *
- * `chosenBy` and `roles` are the audit trail: who picked the model, and what
- * the shortlist said about it at that moment.
+ * `chosenBy`, `roles` and `dataSharing` are the audit trail: who picked the
+ * model, what the shortlist said about it at that moment, and whether the
+ * path's price entry warns that the provider may retain prompts. An explicit
+ * caller model is never blocked on `dataSharing` — the caller asked for it —
+ * but the event records it so a later review can see what was sent where.
  *
  * @param {{ requested: string|null, storedModel: string|null|undefined, tier: string, deps: Record<string, any> }} input
- * @returns {{ model: string, passModel: boolean, overrode: string|null, chosenBy: 'caller'|'pinned'|'auto', roles: string[] }}
+ * @returns {{ model: string, passModel: boolean, overrode: string|null, chosenBy: 'caller'|'pinned'|'auto', roles: string[], dataSharing: boolean }}
  */
 function resolveDispatchModel({ requested, storedModel, tier, deps }) {
   const stored = typeof storedModel === 'string' && storedModel.trim() ? storedModel.trim() : null;
 
   if (requested === null && stored !== null && stored !== 'auto') {
-    assertDispatchableModel(stored, deps);
-    return { model: stored, passModel: false, overrode: null, chosenBy: 'pinned', roles: [] };
+    const entry = assertDispatchableModel(stored, deps);
+    return {
+      model: stored,
+      passModel: false,
+      overrode: null,
+      chosenBy: 'pinned',
+      roles: [],
+      dataSharing: entry.dataSharing === true,
+    };
   }
 
   if (requested === null || requested === 'auto') {
@@ -320,10 +332,11 @@ function resolveDispatchModel({ requested, storedModel, tier, deps }) {
       overrode: null,
       chosenBy: 'auto',
       roles: optionRoles(decision, fallback.id),
+      dataSharing: fallback.dataSharing === true,
     };
   }
 
-  assertDispatchableModel(requested, deps);
+  const entry = assertDispatchableModel(requested, deps);
   const overrode = stored !== null && stored !== 'auto' && stored !== requested ? stored : null;
   // The caller's pick is respected as-is; the shortlist is read only to log
   // which option (if any) the caller took. A routing failure must not block a
@@ -334,7 +347,7 @@ function resolveDispatchModel({ requested, storedModel, tier, deps }) {
   } catch {
     roles = [];
   }
-  return { model: requested, passModel: true, overrode, chosenBy: 'caller', roles };
+  return { model: requested, passModel: true, overrode, chosenBy: 'caller', roles, dataSharing: entry.dataSharing === true };
 }
 
 /**
@@ -612,6 +625,7 @@ function buildDispatchTools(deps) {
             model: resolved.model,
             chosenBy: resolved.chosenBy,
             roles: resolved.roles,
+            dataSharing: resolved.dataSharing === true,
           });
         } catch (error) {
           process.stderr.write(

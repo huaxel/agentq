@@ -82,6 +82,20 @@ function withHealth(deps, args, health) {
 }
 
 /**
+ * The routing-core arguments both recommend tools build. `excludeDataSharing`
+ * is only sent when the caller asked for private work, so the default payload
+ * stays exactly what it was.
+ *
+ * @param {{ tier: string, minIntelligence?: number, allowUnknownCapacity: boolean, excludeDataSharing?: boolean }} input
+ * @returns {Record<string, any>}
+ */
+function routeArgs({ tier, minIntelligence, allowUnknownCapacity, excludeDataSharing = false }) {
+  const args = { tier, minIntelligence, allowUnknownCapacity };
+  if (excludeDataSharing) args.excludeDataSharing = true;
+  return args;
+}
+
+/**
  * The routed answer both recommend tools return.
  *
  * A shortlist is the point: a caller cannot weigh the full ranked list, and the
@@ -121,6 +135,8 @@ function buildReadTools(deps) {
       throw new TypeError(`buildReadTools: deps.${key} must be a function`);
     }
   }
+  // getPathGaps is optional: a host that wires only the catalog and capacity
+  // still gets every other read tool, and path_gaps says what is missing.
 
   return [
     {
@@ -172,8 +188,11 @@ function buildReadTools(deps) {
         + 'or to models whose path is currently available. `intelligenceSource` is "roi" for a '
         + 'measured score and "aa-estimate" for a conservative Artificial Analysis estimate '
         + '(`aaIndex` plus the `calibration` fit behind it); an estimate is never `scored`. '
-        + '`costSource` is "roi" for the ROI blended list price and "aa-price" for an AA list '
-        + 'price used because the model has no registry row.',
+        + '`costSource` is "path-price" for the subscription\'s own price list, "roi" for the '
+        + 'ROI blended list price, and "aa-price" for an AA list price used because the model '
+        + 'has no registry row. `costBasis` says which token mix and allowance scale produced '
+        + 'a mix-derived cost, and `dataSharing` marks a path whose price entry says the '
+        + 'provider may retain prompts.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -214,6 +233,8 @@ function buildReadTools(deps) {
           calibration: item.calibration ?? null,
           costPerMTok: item.costPerMTok ?? null,
           costSource: item.costSource ?? null,
+          costBasis: item.costBasis ?? null,
+          dataSharing: item.dataSharing === true,
           speed: item.speed ?? null,
           scored: item.scored === true,
           ...capacityFields(byPath.get(item.path)),
@@ -237,7 +258,8 @@ function buildReadTools(deps) {
         + 'quota pace. The caller chooses and passes the '
         + 'chosen id to dispatch_task as `model`. `default` is what "auto" would pick. Pass '
         + 'verbose: true for the full ranked choices and the rejected candidates with reasons. '
-        + 'Advisory only: it does not enqueue or dispatch anything.',
+        + 'Pass private: true to exclude paths whose price entry says the provider may retain '
+        + 'prompts. Advisory only: it does not enqueue or dispatch anything.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -257,6 +279,11 @@ function buildReadTools(deps) {
             default: false,
             description: 'Allow paths whose capacity state is unknown to be recommended.',
           },
+          private: {
+            type: 'boolean',
+            default: false,
+            description: 'Exclude paths whose price entry says the provider may retain prompts.',
+          },
           verbose: {
             type: 'boolean',
             default: false,
@@ -267,13 +294,18 @@ function buildReadTools(deps) {
       },
       annotations: { readOnlyHint: true },
       handler(args) {
-        assertKnownArgs(args, ['tier', 'min_intelligence', 'allow_unknown_capacity', 'verbose']);
+        assertKnownArgs(args, ['tier', 'min_intelligence', 'allow_unknown_capacity', 'private', 'verbose']);
         const tier = optionalEnum(args, 'tier', TIERS) ?? 'medium';
         const minIntelligence = optionalNumber(args, 'min_intelligence', { min: 0 });
         const allowUnknownCapacity = optionalBoolean(args, 'allow_unknown_capacity') ?? false;
+        const excludeDataSharing = optionalBoolean(args, 'private') ?? false;
         const verbose = optionalBoolean(args, 'verbose') ?? false;
         const health = readHealth(deps);
-        const result = deps.recommend(withHealth(deps, { tier, minIntelligence, allowUnknownCapacity }, health));
+        const result = deps.recommend(withHealth(
+          deps,
+          routeArgs({ tier, minIntelligence, allowUnknownCapacity, excludeDataSharing }),
+          health,
+        ));
         if (!result || typeof result !== 'object') throw new Error('routing core returned no recommendation');
         return routedResponse(result, { verbose, degraded: degradedEntries(health) });
       },
@@ -287,7 +319,8 @@ function buildReadTools(deps) {
         + 'best-value, alternative), and cost is adjusted by quota pace. The caller chooses and '
         + 'passes the chosen id to dispatch_task '
         + 'as `model`. `default` is what "auto" would pick. Pass verbose: true for the full ranked '
-        + 'choices and the rejected candidates with reasons. When the task pins an explicit model '
+        + 'choices and the rejected candidates with reasons, and private: true to exclude paths '
+        + 'whose price entry says the provider may retain prompts. When the task pins an explicit model '
         + 'this returns that model\'s catalog entry, its execution path\'s capacity state, and '
         + 'whether it is currently eligible. Advisory only: it does not claim, dispatch, or change '
         + 'the task.',
@@ -301,6 +334,11 @@ function buildReadTools(deps) {
             default: 'medium',
             description: 'Task size tier to route for when the task model is "auto". Defaults to medium.',
           },
+          private: {
+            type: 'boolean',
+            default: false,
+            description: 'Exclude paths whose price entry says the provider may retain prompts.',
+          },
           verbose: {
             type: 'boolean',
             default: false,
@@ -312,9 +350,10 @@ function buildReadTools(deps) {
       },
       annotations: { readOnlyHint: true },
       handler(args) {
-        assertKnownArgs(args, ['id', 'tier', 'verbose']);
+        assertKnownArgs(args, ['id', 'tier', 'private', 'verbose']);
         const id = requiredString(args, 'id', { max: 128 });
         const tier = optionalEnum(args, 'tier', TIERS) ?? 'medium';
+        const excludeDataSharing = optionalBoolean(args, 'private') ?? false;
         const verbose = optionalBoolean(args, 'verbose') ?? false;
         const task = deps.getTask(id);
         if (!task) throw new Error(`Task not found: ${id}`);
@@ -322,7 +361,11 @@ function buildReadTools(deps) {
         const model = typeof task.model === 'string' ? task.model.trim() : '';
         if (model === '' || model === 'auto') {
           const health = readHealth(deps);
-          const result = deps.recommend(withHealth(deps, { tier, minIntelligence: undefined, allowUnknownCapacity: false }, health));
+          const result = deps.recommend(withHealth(
+            deps,
+            routeArgs({ tier, minIntelligence: undefined, allowUnknownCapacity: false, excludeDataSharing }),
+            health,
+          ));
           if (!result || typeof result !== 'object') throw new Error('routing core returned no recommendation');
           return {
             task: summarizeTask(task),
@@ -385,6 +428,8 @@ function buildReadTools(deps) {
               calibration: entry.calibration ?? null,
               costPerMTok: entry.costPerMTok ?? null,
               costSource: entry.costSource ?? null,
+              costBasis: entry.costBasis ?? null,
+              dataSharing: entry.dataSharing === true,
               scored: entry.scored === true,
             }
             : null,
@@ -392,6 +437,24 @@ function buildReadTools(deps) {
           eligible: entry !== null && fields.capacityState === 'available',
           reasons,
         };
+      },
+    },
+    {
+      name: 'path_gaps',
+      description:
+        'Read-only price-table gap report. For each quota path with a `prices` table, lists the '
+        + 'priced models that have no runnable on that path (cheapest first) and the runnables '
+        + 'whose model has no price entry, so they fall back to the ROI or AA price.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
+      handler(args) {
+        assertKnownArgs(args, []);
+        if (typeof deps.getPathGaps !== 'function') {
+          throw new Error('path gaps are unavailable: the routing core does not expose getPathGaps');
+        }
+        const report = deps.getPathGaps();
+        if (!report || typeof report !== 'object') throw new Error('routing core returned no path gap report');
+        return report;
       },
     },
     {

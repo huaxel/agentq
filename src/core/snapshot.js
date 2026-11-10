@@ -22,7 +22,9 @@ const path = require('node:path');
 const { buildCatalog, loadRunnables } = require('./catalog.js');
 const { capacityFor, readCapacity } = require('./capacity.js');
 const { buildCalibration } = require('./aa-estimate.js');
+const { pathGaps } = require('./path-gaps.js');
 const { recommend: rankAndRecommend } = require('./routing.js');
+const { mixIndex, parseCsv } = require('./token-mix.js');
 const { agentqHome, loadRoiConfig } = require('../lib/home.js');
 const { coverageProblems } = require('../lib/path-coverage.js');
 const { quotaPathId } = require('../lib/subscriptions.js');
@@ -36,6 +38,7 @@ const { quotaPathId } = require('../lib/subscriptions.js');
  * @property {string} [roiConfigPath] Overrides AGENTQ_ROI_CONFIG and the merged home config (subscription dates).
  * @property {string} [aaSnapshotPath] Overrides AGENTQ_AA_SNAPSHOT and the <home>/data/aa-snapshot*.json default.
  * @property {string} [registryPath] Benchmark registry used to pin AA slugs (calibration only).
+ * @property {string} [mixPath] Overrides AGENTQ_MIX_CSV and <home>/data/ccagg-by-model-path.csv.
  * @property {number} [threshold] Capacity headroom threshold (default 85).
  * @property {number} [now] Inject the clock (tests, replays).
  */
@@ -47,6 +50,8 @@ const { quotaPathId } = require('../lib/subscriptions.js');
  * @property {number} [minIntelligence]
  * @property {boolean} [allowUnknownCapacity]
  * @property {boolean} [allowUnscored]
+ * @property {boolean} [excludeDataSharing] Reject choices whose path price entry says the
+ *   provider may retain prompts (private work).
  * @property {Map<string, { state: 'healthy'|'degraded', consecutive: number, lastFailureAt: string|null, reason: string|null }>} [pathHealth]
  *   Per-path infrastructure-failure verdicts (src/core/path-health.js).
  *   Degraded choices sort after every healthy choice but stay eligible.
@@ -62,7 +67,7 @@ const { quotaPathId } = require('../lib/subscriptions.js');
  * `<home>/config/roi.config.json`, which is what getCatalog reads.
  *
  * @param {SnapshotOptions} [opts]
- * @returns {{ home: string, quotaPath: string, roiOutputPath: string, runnablesPath: string, roiConfigPath: string|null, aaSnapshotPath: string, registryPath: string, now: number|undefined }}
+ * @returns {{ home: string, quotaPath: string, roiOutputPath: string, runnablesPath: string, roiConfigPath: string|null, aaSnapshotPath: string, registryPath: string, mixPath: string, now: number|undefined }}
  */
 function resolvePaths(opts = {}) {
   const home = opts.home ? path.resolve(opts.home) : agentqHome();
@@ -74,6 +79,7 @@ function resolvePaths(opts = {}) {
     roiConfigPath: opts.roiConfigPath ?? process.env.AGENTQ_ROI_CONFIG ?? null,
     aaSnapshotPath: opts.aaSnapshotPath ?? process.env.AGENTQ_AA_SNAPSHOT ?? defaultAaSnapshotPath(home),
     registryPath: opts.registryPath ?? process.env.AGENTQ_BENCHMARK_INPUTS ?? path.join(home, 'data', 'benchmark-inputs.json'),
+    mixPath: opts.mixPath ?? process.env.AGENTQ_MIX_CSV ?? path.join(home, 'data', 'ccagg-by-model-path.csv'),
     now: opts.now,
   };
 }
@@ -109,6 +115,26 @@ function readJsonIfExists(file, label, { optional = false } = {}) {
 }
 
 /**
+ * Observed per-(model, path) token totals, or an empty index.
+ *
+ * The mix only refines a price, so a missing or unreadable file is not an
+ * error: `mixFor` then falls back to the model-wide rows, then to the global
+ * `costBlend`. Parsing never throws, and a file that yields no usable rows is
+ * the same as no file.
+ *
+ * @param {string} file
+ * @returns {ReturnType<typeof mixIndex>}
+ */
+function loadMixIndex(file) {
+  if (!fs.existsSync(file)) return mixIndex([]);
+  try {
+    return mixIndex(parseCsv(fs.readFileSync(file, 'utf8')));
+  } catch {
+    return mixIndex([]);
+  }
+}
+
+/**
  * Runnable universe joined with ROI scores. A missing ROI export leaves every
  * entry unscored rather than failing the call.
  *
@@ -116,7 +142,7 @@ function readJsonIfExists(file, label, { optional = false } = {}) {
  * @returns {import('./catalog.js').CatalogEntry[]}
  */
 function getCatalog(opts = {}) {
-  const { home, roiOutputPath, runnablesPath, roiConfigPath, aaSnapshotPath, registryPath, now } = resolvePaths(opts);
+  const { home, roiOutputPath, runnablesPath, roiConfigPath, aaSnapshotPath, registryPath, mixPath, now } = resolvePaths(opts);
   const runnables = loadRunnables(runnablesPath);
   const roi = readJsonIfExists(roiOutputPath, 'ROI output');
   const roiModels = roi && Array.isArray(roi.models) ? roi.models : [];
@@ -132,7 +158,15 @@ function getCatalog(opts = {}) {
     ? roiConfig.costBlend : null;
   const { aaSnapshot, calibration, registryRows } = loadAaEstimates({ roiModels, aaSnapshotPath, registryPath });
   return buildCatalog({
-    runnables, roiModels, subscriptions, now: now ?? Date.now(), aaSnapshot, calibration, registryRows, costBlend,
+    runnables,
+    roiModels,
+    subscriptions,
+    now: now ?? Date.now(),
+    aaSnapshot,
+    calibration,
+    registryRows,
+    costBlend,
+    mixIndex: loadMixIndex(mixPath),
   });
 }
 
@@ -241,7 +275,33 @@ function recommend(args = {}) {
     minIntelligence: args.minIntelligence,
     allowUnknownCapacity: args.allowUnknownCapacity,
     allowUnscored: args.allowUnscored,
+    excludeDataSharing: args.excludeDataSharing,
     pathHealth: args.pathHealth,
+  });
+}
+
+/**
+ * Price-table gaps per quota path: priced models with no runnable there, and
+ * runnables with no price entry (src/core/path-gaps.js).
+ *
+ * Read-only and advisory: it reports what the setup and the price table
+ * disagree about, and changes neither.
+ *
+ * @param {SnapshotOptions} [opts]
+ * @returns {{ paths: import('./path-gaps.js').GapPath[] }}
+ */
+function getPathGaps(opts = {}) {
+  const { home, runnablesPath, roiConfigPath, mixPath, now } = resolvePaths(opts);
+  const roiConfig = roiConfigPath ? readJsonIfExists(roiConfigPath, 'ROI config') : loadRoiConfig({ home });
+  const subscriptions = roiConfig && Array.isArray(roiConfig.paths) ? roiConfig.paths : [];
+  const costBlend = roiConfig && roiConfig.costBlend && typeof roiConfig.costBlend === 'object'
+    ? roiConfig.costBlend : null;
+  return pathGaps({
+    subscriptions,
+    runnables: loadRunnables(runnablesPath),
+    mixIndex: loadMixIndex(mixPath),
+    costBlend,
+    now: now ?? Date.now(),
   });
 }
 
@@ -266,5 +326,13 @@ function coverageIssues(opts = {}) {
 }
 
 module.exports = {
-  resolvePaths, defaultAaSnapshotPath, loadAaEstimates, getCatalog, getCapacity, recommend, coverageIssues,
+  resolvePaths,
+  defaultAaSnapshotPath,
+  loadAaEstimates,
+  loadMixIndex,
+  getCatalog,
+  getCapacity,
+  getPathGaps,
+  recommend,
+  coverageIssues,
 };

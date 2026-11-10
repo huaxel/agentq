@@ -333,3 +333,66 @@ test('a null pace leaves the order on list price', () => {
   assert.ok(choices.every((choice) => choice.pace === null && choice.quotaPressure === null));
   assert.ok(choices.every((choice) => !choice.reasons.some((reason) => reason.startsWith('pace '))));
 });
+
+// --- path prices and data sharing (W16) -------------------------------------
+
+const COST_BASIS = {
+  source: 'path-price',
+  mix: { cacheRead: 0.95, cacheWrite: 0, input: 0.05, output: 0 },
+  mixSource: 'observed-path',
+  mixTokens: 41_000_000,
+  peak: true,
+  allowanceScale: 0.1,
+};
+
+test('a path-price cost carries its basis and its own reason into the choice', () => {
+  const { choices } = rank({
+    catalog: [entry('priced', {
+      costSource: 'path-price',
+      costBasis: COST_BASIS,
+      costReason: 'cost $0.0012/MTok (path price, peak, mix 95/0/5/0 cache-read/write/in/out observed 41M tok, × $10/$100 allowance)',
+    })],
+    capacity: new Map([['codex', cap('codex')]]),
+    tier: 'medium',
+  });
+  assert.deepEqual(choices[0].costBasis, COST_BASIS);
+  assert.equal(choices[0].dataSharing, false);
+  assert.ok(choices[0].reasons.includes(
+    'cost $0.0012/MTok (path price, peak, mix 95/0/5/0 cache-read/write/in/out observed 41M tok, × $10/$100 allowance)',
+  ));
+});
+
+test('an expired price entry is rejected with its date', () => {
+  const { choices, rejected } = rank({
+    catalog: [entry('expired', { priceExpired: 'price entry expired 2026-11-01' })],
+    capacity: new Map([['codex', cap('codex')]]),
+    tier: 'medium',
+  });
+  assert.deepEqual(choices, []);
+  assert.deepEqual(rejected[0].reasons, ['price entry expired 2026-11-01']);
+});
+
+test('a data-sharing choice stays eligible with a reason, unless private work excludes it', () => {
+  const catalog = [entry('shared', { dataSharing: true }), entry('clean', { costPerMTok: 2 })];
+  const capacity = new Map([['codex', cap('codex')]]);
+
+  const open = rank({ catalog, capacity, tier: 'medium' });
+  assert.deepEqual(open.choices.map((choice) => choice.id), ['shared', 'clean']);
+  assert.ok(open.choices[0].reasons.includes('data sharing: provider may retain prompts'));
+
+  const private_ = rank({ catalog, capacity, tier: 'medium', excludeDataSharing: true });
+  assert.deepEqual(private_.choices.map((choice) => choice.id), ['clean']);
+  assert.deepEqual(private_.rejected[0].reasons, ['data sharing: excluded for private work']);
+});
+
+test('recommend passes the private switch through, and the option carries the flag', () => {
+  const catalog = [entry('shared', { dataSharing: true })];
+  const capacity = new Map([['codex', cap('codex')]]);
+  const open = recommend({ catalog, capacity, tier: 'medium' });
+  assert.equal(open.options[0].dataSharing, true);
+  assert.deepEqual(open.options[0].costBasis, null);
+
+  const excluded = recommend({ catalog, capacity, tier: 'medium', excludeDataSharing: true });
+  assert.deepEqual(excluded.options, []);
+  assert.equal(excluded.default, null);
+});

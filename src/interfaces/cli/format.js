@@ -11,6 +11,7 @@
 
 const path = require('node:path');
 const { capacityFor } = require('../../core/capacity.js');
+const { formatCost: formatPrice, formatDollars } = require('../../lib/path-prices.js');
 
 /**
  * @param {import('../../core/capacity.js').CapacityEntry|undefined} entry
@@ -67,6 +68,20 @@ function intelligenceCell(entry) {
 }
 
 /**
+ * A $/MTok amount with enough precision to compare. Allowance-scaled
+ * subscription prices are fractions of a cent, and `$0.00` would hide the
+ * ordering the table exists to show: two decimals from $1, four below it.
+ *
+ * @param {number} amount
+ * @returns {string}
+ */
+function dollars(amount) {
+  const value = Number(amount);
+  if (value === 0) return '$0';
+  return `$${Math.abs(value) >= 1 ? value.toFixed(2) : value.toFixed(4)}`;
+}
+
+/**
  * Cost as a table cell. An AA list price is marked `~` like the estimate it
  * travels with.
  *
@@ -75,7 +90,7 @@ function intelligenceCell(entry) {
  */
 function costCell(entry) {
   if (entry.costPerMTok == null) return '—';
-  const value = `$${Number(entry.costPerMTok).toFixed(2)}`;
+  const value = dollars(entry.costPerMTok);
   return entry.costSource === 'aa-price' ? `~${value}` : value;
 }
 
@@ -87,7 +102,7 @@ function costCell(entry) {
  */
 function effectiveCostCell(entry) {
   if (entry.effectiveCostPerMTok == null) return '—';
-  const value = `$${Number(entry.effectiveCostPerMTok).toFixed(2)}`;
+  const value = dollars(entry.effectiveCostPerMTok);
   return entry.costSource === 'aa-price' ? `~${value}` : value;
 }
 
@@ -193,6 +208,37 @@ function formatOptionsTable(options = [], { title = 'options' } = {}) {
   return lines.join('\n');
 }
 
+/**
+ * The price-table gap report as text: one block per priced quota path, the
+ * missing (priced, not runnable) models cheapest first, then the runnables the
+ * price table does not cover.
+ *
+ * @param {{ paths?: Array<{ path: string, pathName: string, fee: number, missing: Array<{ modelKey: string, costPerMTok: number|null, reason: string|null, expired: boolean }>, unpriced: Array<{ id: string, modelKey: string }> }> }} [report]
+ * @returns {string}
+ */
+function formatGapReport(report) {
+  const paths = report && Array.isArray(report.paths) ? report.paths : [];
+  if (!paths.length) return 'no priced paths: add a "prices" table to config.paths[]';
+  const lines = ['path gaps — priced models with no runnable, cheapest first', ''];
+  for (const entry of paths) {
+    const name = entry.pathName && entry.pathName !== entry.path ? `${entry.pathName} (${entry.path})` : entry.path;
+    lines.push(`${name} — fee ${formatDollars(entry.fee)}`);
+    if (!entry.missing.length && !entry.unpriced.length) {
+      lines.push('  no gaps');
+      continue;
+    }
+    for (const gap of entry.missing) {
+      const cost = gap.costPerMTok === null ? '—' : `${formatPrice(gap.costPerMTok)}/MTok`;
+      const note = gap.expired ? 'expired' : (gap.reason || '');
+      lines.push(`  missing   ${gap.modelKey.padEnd(28)} ${cost.padStart(12)}  ${note}`);
+    }
+    for (const gap of entry.unpriced) {
+      lines.push(`  unpriced  ${gap.id.padEnd(28)} ${'—'.padStart(12)}  no price entry (falls back to roi or aa-price)`);
+    }
+  }
+  return lines.join('\n');
+}
+
 function truncateRepo(repoPath) {
   return path.basename(repoPath || '');
 }
@@ -246,6 +292,7 @@ module.exports = {
   formatModelRow,
   formatModelTable,
   formatOptionsTable,
+  formatGapReport,
   effectiveCostCell,
   paceCell,
   pathCell,

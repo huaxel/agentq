@@ -155,6 +155,34 @@ bind and takes the smallest headroom, which is what a provider enforcing a
 separate sub-accounts or model groups that fail over. Any other value is a
 validation error.
 
+### Subscription prices
+
+`config.paths[].prices` is the subscription's own price list, keyed by model
+key (normalized with `src/lib/model-key.js`). The ROI pipeline never reads it —
+scoring keeps its single global `costBlend` — but routing does, because a
+fee-based allowance is not priced by a list price alone. Each entry:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `input`, `output`, `cacheRead`, `cacheWrite` | number or null | USD per 1M tokens. `null` counts as 0 and the reason says `(no X price)`. |
+| `monthlyLimit` | number or null | List-price dollars per month the path fee buys (`fee ÷ monthlyLimit` scales the cost). `null` = pay-per-token, no scaling. Must be positive when set. |
+| `offPeak` | object | An alternative price set, same fields. A field it omits falls back to the peak price. |
+| `longContext` | array | `[{ aboveTokens, input, output, cacheRead, cacheWrite }]`. Stored and validated, **not used for routing yet**. |
+| `free` | boolean | `true` means cost 0. |
+| `until` | `YYYY-MM-DD` | From that date the model is rejected (`free tier ended <date>` when `free`, else `price entry expired <date>`). |
+| `dataSharing` | boolean | The provider may retain prompts; `agentq pick --private` excludes it. |
+
+`config.paths[].offPeakHours` is optional and belongs to the same entry:
+`{ "tz": "UTC", "start": "16:30", "end": "00:30" }`. `tz` is an IANA zone
+name or `UTC`, the times are 24-hour `HH:MM`, the end is exclusive, and the
+window may wrap past midnight. Without it the peak price always applies.
+
+Validation errors: a wrong type, a negative price, a non-positive
+`monthlyLimit`, a malformed `offPeakHours` (unknown zone, bad time, equal start
+and end) and a malformed `until`. Warning: a price key the path's coverage does
+not list (`"*"` covers all). The formula, precedence and the observed token mix
+are in [agentq.md](agentq.md#subscription-prices).
+
 A home that still carries the old per-subscription registry columns (`onLocal`,
 `onGo`, `onCodex`, `onClaudeMax`, `onOpenRouter`, …) and `paths[].availKey` is
 converted once with:

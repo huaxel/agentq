@@ -12,7 +12,7 @@ const {
   runVerify,
 } = require('../../runners/execute.js');
 const { jobWorktreePath } = require('../../queue/job-state.js');
-const { coverageIssues, recommend, resolvePaths } = require('../../core/snapshot.js');
+const { coverageIssues, getPathGaps, recommend, resolvePaths } = require('../../core/snapshot.js');
 const { degradedMarkers } = require('../../core/routing.js');
 const { loadPathHealthFile } = require('../../queue/path-health.js');
 const { refreshQuotaIfStale } = require('../../lib/quota-refresh.js');
@@ -30,6 +30,7 @@ const {
   formatModelRow,
   formatModelTable,
   formatOptionsTable,
+  formatGapReport,
   truncateRepo,
   formatCost,
   formatJobBlock,
@@ -55,7 +56,8 @@ function usage() {
   node bin/agentq.js [global opts] requeue --id ID [--model MODEL] [--json]
   node bin/agentq.js [global opts] recover [--max-age-min N] [--json]
   node bin/agentq.js [global opts] prune [--force] [--json]
-  node bin/agentq.js [global opts] pick [--tier small|medium|big] [--quota PATH] [--threshold N] [--json]
+  node bin/agentq.js [global opts] pick [--tier small|medium|big] [--quota PATH] [--threshold N] [--private] [--json]
+  node bin/agentq.js [global opts] paths gaps [--json]
   node bin/agentq.js [global opts] status [--json]
   node bin/agentq.js [global opts] save-workflow --name NAME --file PATH [--json]
   node bin/agentq.js [global opts] list-workflows [--json]
@@ -88,6 +90,12 @@ function usage() {
   Auto-routing options:
     --tier small|medium|big  Intelligence floor for --model auto (default: medium)
     --quota PATH             Quota snapshot used for capacity (default: <home>/data/quota.json)
+    --private                Exclude paths whose price entry says the provider may
+                             retain prompts (dataSharing: true)
+
+  Path prices:
+    agentq paths gaps        Priced models with no runnable on their path, and
+                             runnables on a priced path with no price entry
 
   Home:
     Everything personal lives outside the checkout, in $AGENTQ_HOME
@@ -146,8 +154,10 @@ function parseArgs(argv) {
 
   const command = args.shift() || 'help';
   const options = {};
-  // `agentq home [init]` takes a bare subcommand, not a flag.
-  if (command === 'home' && args[0] && !args[0].startsWith('--')) options.action = args.shift();
+  // `agentq home [init]` and `agentq paths gaps` take a bare subcommand, not a flag.
+  if ((command === 'home' || command === 'paths') && args[0] && !args[0].startsWith('--')) {
+    options.action = args.shift();
+  }
   while (args.length) {
     const flag = args.shift();
     if (flag === '--json') options.json = true;
@@ -166,6 +176,7 @@ function parseArgs(argv) {
     else if (flag === '--cua') options.cua = true;
     else if (flag === '--quota') options.quota = needValue(args, flag);
     else if (flag === '--tier') options.tier = needValue(args, flag);
+    else if (flag === '--private') options.private = true;
     else if (flag === '--threshold') options.threshold = Number(needValue(args, flag));
     else if (flag === '--verify') options.verify = needValue(args, flag);
     else if (flag === '--retry') options.retries = Number(needValue(args, flag));
@@ -540,7 +551,12 @@ async function commandPick(global, options) {
   // routing cannot repair. `npm run verify` fails on it; here it is a warning
   // so a pick still returns the best decision it can.
   for (const issue of coverageIssues(snapshotArgs)) process.stderr.write(`coverage: ${issue}\n`);
-  const decision = recommend({ ...snapshotArgs, tier, pathHealth: loadPathHealthFile(global.db) });
+  const decision = recommend({
+    ...snapshotArgs,
+    tier,
+    excludeDataSharing: options.private === true,
+    pathHealth: loadPathHealthFile(global.db),
+  });
   if (options.json) {
     print({ tier, ...decision }, true);
     return decision.default ? 0 : 1;
@@ -559,6 +575,23 @@ async function commandPick(global, options) {
   }
   process.stdout.write(`default → no eligible model: ${summarizeRejections(decision.rejected)}\n`);
   return 1;
+}
+
+/**
+ * `agentq paths gaps`: what the price tables promise and the setup cannot run,
+ * and what the setup runs that no price table covers. Read-only.
+ */
+function commandPaths(options) {
+  if (options.action !== 'gaps') {
+    throw new Error(`unknown paths command: ${options.action} (expected "gaps")`);
+  }
+  const report = getPathGaps({});
+  if (options.json) {
+    print(report, true);
+    return 0;
+  }
+  process.stdout.write(`${formatGapReport(report)}\n`);
+  return 0;
 }
 
 function commandSaveWorkflow(options) {
@@ -708,6 +741,7 @@ async function main(argv = process.argv.slice(2)) {
   // its database (pick/list-workflows/save-workflow are pure, jules-* open the
   // orchestrator database themselves, import-log opens the target itself).
   if (command === 'home') return commandHome(options);
+  if (command === 'paths') return commandPaths(options);
   if (command === 'import-log') return commandImportLog(global, options);
   if (command === 'pick') return commandPick(global, options);
   if (command === 'save-workflow') return commandSaveWorkflow(options);

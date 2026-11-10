@@ -5,6 +5,7 @@
  */
 
 const { coverageProblems, coverageWarnings } = require('./path-coverage.js');
+const { priceProblems, priceWarnings } = require('./path-prices.js');
 
 /**
  * @param {object} config  parsed config/roi.config.json
@@ -57,6 +58,11 @@ function configProblems(config, { runnables = [] } = {}) {
   // practice: routing would offer a model the subscription does not serve.
   // Only checked when the caller loaded runnables too.
   problems.push(...coverageProblems(config, { runnables }));
+
+  // `paths[].prices` / `offPeakHours` (src/lib/path-prices.js). A silently
+  // ignored price would route on the registry's blended list price while the
+  // operator believes the subscription's own list applies.
+  problems.push(...priceProblems(config));
 
   // profiles: tax + hobby, each weighting the four partitions the scorer reads.
   const partitions = ['agents', 'coding', 'general', 'scientific'];
@@ -115,15 +121,16 @@ function configProblems(config, { runnables = [] } = {}) {
 
 /**
  * Warnings that must not fail a run: a declared model key the registry does not
- * have. A registry that lags a new subscription is normal; a typo in `models`
- * is not, and both look the same here.
+ * have, and a price entry for a model the path's coverage does not list. A
+ * registry that lags a new subscription is normal; a typo in `models` or a
+ * price filed under the wrong key is not, and both look the same here.
  *
  * @param {object} config parsed config/roi.config.json
  * @param {Array<Record<string, any>|string>|null|undefined} registryModels registry rows, or null when unknown
  * @returns {string[]}
  */
 function configWarnings(config, registryModels) {
-  return coverageWarnings(config, registryModels);
+  return [...coverageWarnings(config, registryModels), ...priceWarnings(config)];
 }
 
 /** Throw with all problems listed at once, or return the config unchanged. */

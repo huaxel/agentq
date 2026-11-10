@@ -11,6 +11,14 @@ The fixture models are `acme/atlas-large`, `acme/atlas-flash`,
 missing cache prices, missing benchmarks, local inference, and a model offered
 through multiple subscriptions.
 
+The `go` path also carries a synthetic `prices` table (its own per-token list, a
+`monthlyLimit`, an `offPeakHours` schedule, a `free` entry with an `until` date,
+a `dataSharing` entry, and a `longContext` tier), and
+`data/ccagg-by-model-path.csv` holds the observed per-(model, path) token mix.
+The `atlas-ultra` price entry is deliberately outside the path's coverage: it is
+the model with no runnable on `go`, so `agentq paths gaps` has something to
+report, and `npm run pipeline` prints the coverage warning that case produces.
+
 To regenerate the golden snapshot using this repository's own score and values
 code, run:
 

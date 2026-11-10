@@ -222,6 +222,8 @@ test('an option carries the RankedChoice fields a caller weighs', () => {
     intelligenceSource: 'aa-estimate',
     costPerMTok: 0.1234,
     costSource: 'aa-price',
+    costBasis: null,
+    dataSharing: false,
     effectiveCostPerMTok: 0.03085,
     pace: behind(20),
     quotaPressure: 0.25,

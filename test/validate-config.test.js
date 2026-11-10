@@ -77,3 +77,46 @@ test('flags malformed model price aliases', () => {
   assert.ok(configProblems({ ...realConfig, modelPriceAliases: { '': 'gpt-5-4' } }).some(p => p.includes('alias keys must be non-empty')));
   assert.ok(configProblems({ ...realConfig, modelPriceAliases: { 'gpt-5.4': null } }).some(p => p.includes('expected a non-empty string target')));
 });
+
+// --- path prices (W16) ------------------------------------------------------
+
+const { configWarnings } = require('../src/lib/validate-config.js');
+
+/** The shipped config with one priced path. */
+function withPrices(prices, extra = {}) {
+  return {
+    ...realConfig,
+    paths: realConfig.paths.map((path) => (
+      path.id === 'codex' ? { ...path, prices, ...extra } : path
+    )),
+  };
+}
+
+test('a malformed price table fails validation', () => {
+  const problems = configProblems(withPrices({
+    'atlas-flash': { input: -1, monthlyLimit: 0 },
+    'atlas-ultra': { until: '31/12/2026' },
+  }, { offPeakHours: { tz: 'Nowhere/Nothing', start: '25:00', end: '26:00' } }));
+  assert.ok(problems.some((p) => /prices\["atlas-flash"\]\.input: must not be negative/.test(p)));
+  assert.ok(problems.some((p) => /monthlyLimit: must be a positive number/.test(p)));
+  assert.ok(problems.some((p) => /\.until: expected a YYYY-MM-DD date/.test(p)));
+  assert.ok(problems.some((p) => /offPeakHours\.tz "Nowhere\/Nothing" is not a known time zone/.test(p)));
+});
+
+test('a valid price table validates clean, and an uncovered key only warns', () => {
+  const config = withPrices({
+    'example-codex': { input: 0.15, output: 0.6, cacheRead: 0.003, monthlyLimit: 100 },
+    'atlas-ultra': { input: 0.6, output: 2.4, cacheRead: 0.012, monthlyLimit: 15 },
+  }, { offPeakHours: { tz: 'UTC', start: '16:30', end: '00:30' } });
+  assert.deepEqual(configProblems(config), []);
+  assert.deepEqual(configWarnings(config, null), [
+    "path codex: price for atlas-ultra is not in the path's coverage",
+  ]);
+});
+
+test('the synthetic fixture home config validates clean', () => {
+  // The fixture home carries only the setup; the method defaults supply the
+  // scorer's tables, so the effective config is what must validate.
+  const fixture = loadRoiConfig({ home: path.join(__dirname, '..', 'testdata', 'home') });
+  assert.deepEqual(configProblems(fixture), []);
+});

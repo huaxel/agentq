@@ -119,6 +119,21 @@ function subscriptionStatus(subscriptions, pathId, now = Date.now()) {
 }
 
 /**
+ * The config entries funding a quota path whose subscription dates cover
+ * `now`, in config order. This is the money currently paying for the path, so
+ * anything priced from the path's fee (path prices, W16) sums these.
+ *
+ * @param {Array<Record<string, any>>|null|undefined} subscriptions roi.config.json `paths`
+ * @param {string} pathId
+ * @param {number} [now]
+ * @returns {Array<Record<string, any>>}
+ */
+function activeFundingEntries(subscriptions, pathId, now = Date.now()) {
+  const today = currentDay(now);
+  return fundingEntries(subscriptions, pathId).filter((p) => isActiveOn(p, today));
+}
+
+/**
  * Display names of the config paths currently funding a quota path, in config
  * order. Empty when none is active — the caller falls back to the path id.
  *
@@ -128,10 +143,16 @@ function subscriptionStatus(subscriptions, pathId, now = Date.now()) {
  * @returns {string[]}
  */
 function activeSubscriptionNames(subscriptions, pathId, now = Date.now()) {
-  const today = currentDay(now);
-  return fundingEntries(subscriptions, pathId)
-    .filter((p) => isActiveOn(p, today))
+  return activeFundingEntries(subscriptions, pathId)
     .map((p) => (typeof p.name === 'string' && p.name.trim() ? p.name.trim() : p.id));
 }
 
-module.exports = { day8, quotaPathId, fundsQuotaPath, activeSubscriptionNames, subscriptionStatus };
+module.exports = {
+  day8,
+  quotaPathId,
+  fundsQuotaPath,
+  fundingEntries,
+  activeFundingEntries,
+  activeSubscriptionNames,
+  subscriptionStatus,
+};

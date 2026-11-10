@@ -433,7 +433,7 @@ test('dispatch_task records how the model was chosen, with its shortlist roles',
   assert.deepEqual(pinned.calls.events, [{
     taskId: 't1',
     event: 'model-chosen',
-    payload: { model: 'gpt-5', chosenBy: 'pinned', roles: [] },
+    payload: { model: 'gpt-5', chosenBy: 'pinned', roles: [], dataSharing: false },
   }]);
   assert.equal(pinned.calls.recommend.length, 0, 'a pin is not re-routed');
 
@@ -441,29 +441,60 @@ test('dispatch_task records how the model was chosen, with its shortlist roles',
   const caller = fakeDeps();
   tool('dispatch_task', caller.deps).handler({ id: 't1', model: 'unscored-model' });
   assert.deepEqual(caller.calls.events[0].payload, {
-    model: 'unscored-model', chosenBy: 'caller', roles: [],
+    model: 'unscored-model', chosenBy: 'caller', roles: [], dataSharing: false,
   });
 
   // Caller picks an option from the shortlist: its roles are logged.
   const fromList = fakeDeps({ getTask: () => trustedTask({ model: 'auto' }) });
   tool('dispatch_task', fromList.deps).handler({ id: 't1', model: 'gpt-5' });
   assert.deepEqual(fromList.calls.events[0].payload, {
-    model: 'gpt-5', chosenBy: 'caller', roles: ['cheapest', 'smartest'],
+    model: 'gpt-5', chosenBy: 'caller', roles: ['cheapest', 'smartest'], dataSharing: false,
   });
 
   // A routing failure never blocks a caller-chosen dispatch.
   const broken = fakeDeps({ recommend: () => { throw new Error('no catalog'); } });
   tool('dispatch_task', broken.deps).handler({ id: 't1', model: 'gpt-5' });
   assert.deepEqual(broken.calls.events[0].payload, {
-    model: 'gpt-5', chosenBy: 'caller', roles: [],
+    model: 'gpt-5', chosenBy: 'caller', roles: [], dataSharing: false,
   });
 
   // Auto: the routing core decides, and its shortlist says what the model is for.
   const auto = fakeDeps({ getTask: () => trustedTask({ model: 'auto' }) });
   tool('dispatch_task', auto.deps).handler({ id: 't1', tier: 'big' });
   assert.deepEqual(auto.calls.events[0].payload, {
-    model: 'gpt-5', chosenBy: 'auto', roles: ['cheapest', 'smartest'],
+    model: 'gpt-5', chosenBy: 'auto', roles: ['cheapest', 'smartest'], dataSharing: false,
   });
+});
+
+test('dispatch_task logs dataSharing and never blocks an explicit caller model on it', () => {
+  // The price entry says the provider may retain prompts. An explicit caller
+  // model is the caller's decision, so it dispatches — and the audit trail
+  // records what was sent where.
+  const shared = { ...CATALOG[0], dataSharing: true };
+  const caller = fakeDeps({ getCatalog: () => [shared, ...CATALOG.slice(1)] });
+  tool('dispatch_task', caller.deps).handler({ id: 't1', model: 'gpt-5' });
+  assert.equal(caller.calls.events[0].payload.dataSharing, true);
+
+  // A pin carries the same fact.
+  const pinned = fakeDeps({
+    getCatalog: () => [shared, ...CATALOG.slice(1)],
+    getTask: () => trustedTask({ model: 'gpt-5' }),
+  });
+  tool('dispatch_task', pinned.deps).handler({ id: 't1' });
+  assert.equal(pinned.calls.events[0].payload.dataSharing, true);
+
+  // Auto routing reports what the routing core chose.
+  const auto = fakeDeps({
+    getTask: () => trustedTask({ model: 'auto' }),
+    recommend: () => ({
+      options: [{ id: 'gpt-5', path: 'codex', roles: ['cheapest'], dataSharing: true }],
+      default: { id: 'gpt-5', path: 'codex', dataSharing: true },
+      choices: [{ id: 'gpt-5' }],
+      rejected: [],
+    }),
+  });
+  tool('dispatch_task', auto.deps).handler({ id: 't1' });
+  assert.equal(auto.calls.events[0].payload.dataSharing, true);
 });
 
 test('dispatch_task reports a store failure instead of failing a running dispatch', () => {

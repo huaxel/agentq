@@ -29,7 +29,45 @@
       "fee": 10,
       "allowance": null,
       "models": ["atlas-flash", "atlas-mini", "o-mini"],
-      "startDate": "20260601"
+      "startDate": "20260601",
+      "offPeakHours": { "tz": "UTC", "start": "16:30", "end": "00:30" },
+      "prices": {
+        "atlas-flash": {
+          "input": 0.15,
+          "output": 0.6,
+          "cacheRead": 0.003,
+          "cacheWrite": null,
+          "monthlyLimit": 100,
+          "offPeak": { "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": null },
+          "longContext": [
+            { "aboveTokens": 512000, "input": 0.6, "output": 2.4, "cacheRead": 0.12, "cacheWrite": null }
+          ]
+        },
+        "atlas-mini": {
+          "input": 0.05,
+          "output": 0.2,
+          "cacheRead": 0.001,
+          "cacheWrite": null,
+          "monthlyLimit": 15,
+          "free": true,
+          "until": "2026-12-31"
+        },
+        "o-mini": {
+          "input": 0.1,
+          "output": 0.4,
+          "cacheRead": 0.002,
+          "cacheWrite": null,
+          "monthlyLimit": 15,
+          "dataSharing": true
+        },
+        "atlas-ultra": {
+          "input": 0.6,
+          "output": 2.4,
+          "cacheRead": 0.012,
+          "cacheWrite": null,
+          "monthlyLimit": 15
+        }
+      }
     },
     {
       "id": "codex",

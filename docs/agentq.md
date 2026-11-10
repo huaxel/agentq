@@ -611,6 +611,104 @@ of pace is dear because spending it now displaces later work. Pressure only
 scales cost — it never makes a saturated path eligible — and a path with no
 projection keeps its list price and today's order.
 
+### Subscription prices
+
+A list price blended with one global `costBlend` is wrong for an allowance
+subscription in two ways. The subscription has its **own price list** and a per
+model **allowance**: one shared quota, where each model lists the list-price
+dollars the monthly fee buys. And the **token mix** differs per model and
+harness, so cache-read prices — not input prices — decide the blended cost.
+
+Declare the subscription's list on the config path:
+
+```json
+{
+  "id": "go",
+  "fee": 10,
+  "offPeakHours": { "tz": "UTC", "start": "16:30", "end": "00:30" },
+  "prices": {
+    "atlas-flash": {
+      "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": null,
+      "monthlyLimit": 100,
+      "offPeak": { "input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": null },
+      "longContext": [{ "aboveTokens": 512000, "input": 0.6, "output": 2.4, "cacheRead": 0.12 }]
+    },
+    "atlas-mini": { "input": 0.05, "output": 0.2, "cacheRead": 0.001, "monthlyLimit": 15, "free": true, "until": "2026-12-31" },
+    "o-mini": { "input": 0.1, "output": 0.4, "cacheRead": 0.002, "monthlyLimit": 15, "dataSharing": true }
+  }
+}
+```
+
+Prices are USD per 1M tokens. The cost of a model on such a path is
+
+```text
+mixed list price = Σ share × price          (cache-read, cache-write, input, output)
+cost             = mixed list price × (fee ÷ monthlyLimit)
+```
+
+`monthlyLimit` is the list-price dollars per month the fee buys: $1 of usage on
+a $100 limit draws 10% of its value from the quota, while a model on a $15
+limit draws 67%. `null` means pay-per-token — no scaling. The fee is the sum of
+the **active** config paths that fund this quota path (the same
+`sourcePath ?? id` rule coverage uses), so two active plans for one quota path
+are two payments for the same allowance.
+
+| Field | Meaning |
+| --- | --- |
+| `input`, `output`, `cacheRead`, `cacheWrite` | USD per 1M tokens. A `null` price counts as 0 and the reason says `(no X price)`. |
+| `monthlyLimit` | List-price dollars the fee buys. `null` = pay-per-token. |
+| `offPeak` | An alternative price set. A field it omits falls back to the peak price. |
+| `longContext` | Stored and validated, **not used for routing yet**. |
+| `free` | `true` means cost 0. |
+| `until` | `YYYY-MM-DD`. From that date the model is rejected: `free tier ended <date>`, or `price entry expired <date>` when it is not free. |
+| `dataSharing` | `true` says the provider may retain prompts (see below). |
+
+`offPeakHours` sits on the same path entry and is optional. Without it the peak
+price always applies and the reason says `peak price (no off-peak schedule)`.
+A window may wrap past midnight (`16:30` → `00:30`), the end is exclusive, and
+`tz` is an IANA zone name or `UTC`. A malformed schedule, a negative price, a
+non-positive `monthlyLimit` or a malformed `until` is a config error; a price
+key the path's coverage does not list is a warning (`"*"` covers all).
+
+**Precedence.** `path-price` wins, then the registry/ROI price (`roi`), then an
+AA list price (`aa-price`). `costSource` says which one applied, and only
+`aa-price` keeps the `~$` marker in the CLI: a path price is the subscription's
+own list, not an estimate.
+
+**The token mix.** The observed mix comes from
+`<home>/data/ccagg-by-model-path.csv`, per (model, path). The fallback chain is:
+rows for that model and path, then rows for that model on any path, then the
+config's global `costBlend` (`cache` → cache-read, cache writes 0 unless
+`costBlend.cacheWrite` is set). A level only counts at ≥ 1,000,000 tokens.
+There is no harness-level fallback: the CSV has no harness column, so a
+per-harness mix cannot be observed and is not invented. A missing or
+unparseable CSV means the global fallback, never an error. The mix applies to
+`path-price` and `aa-price` costs; a `roi` cost is the ROI pipeline's own blend
+and is carried through unchanged.
+
+Each choice carries `costBasis: { source, mix, mixSource, mixTokens, peak,
+allowanceScale }` and a reason that explains the number, for example:
+
+```text
+cost $0.0012/MTok (path price, off-peak, mix 95/0/5/0 cache-read/write/in/out observed 41M tok, × $10/$100 allowance)
+```
+
+Quota pace then scales that cost into `effectiveCostPerMTok` exactly as before.
+
+**Gap report.** `agentq paths gaps [--json]` lists, for every path with a
+`prices` table, the priced models that have no runnable on that quota path
+(cheapest first, with their computed cost) and the runnables whose model has no
+price entry — those fall back to `roi` or `aa-price`. The same report is the
+read-only MCP tool `path_gaps`.
+
+**Data sharing.** A price entry with `dataSharing: true` marks the catalog
+entry, the choice and the option, and adds the reason `data sharing: provider
+may retain prompts`. `agentq pick --private` (MCP: `private: true`) rejects
+those choices with `data sharing: excluded for private work`. An explicit model
+passed to `dispatch_task` is never blocked on it — the caller asked for it —
+but the `model-chosen` event records `dataSharing` so a later review can see
+what was sent where.
+
 ### Options, not a verdict
 
 agentq informs rather than chooses. Ranking answers "what is eligible, cheapest

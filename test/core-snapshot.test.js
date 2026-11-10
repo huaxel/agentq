@@ -13,6 +13,7 @@ const {
   defaultAaSnapshotPath,
   getCatalog,
   getCapacity,
+  getPathGaps,
   recommend,
   resolvePaths,
 } = require('../src/core/snapshot.js');
@@ -431,4 +432,94 @@ test('recommend rejects runnables whose subscription ended or is not configured'
 
   const missing = fixtureRoot({ roi: ROI, quota: QUOTA, roiConfig: null });
   assert.ok(recommend({ home: missing, now: NOW }).rejected.every((r) => r.subscriptionState === 'unconfigured'));
+});
+
+/* ───── observed token mix and price tables (W16) ───── */
+
+const PRICED_CONFIG = {
+  paths: [
+    {
+      id: 'codex',
+      name: 'Acme Codex',
+      type: 'Wallet',
+      fee: 20,
+      startDate: '20260101',
+      models: ['model-a'],
+      prices: {
+        'model-a': { input: 0.15, output: 0.6, cacheRead: 0.003, monthlyLimit: 100 },
+        'model-gap': { input: 0.5, output: 2, cacheRead: 0.01, monthlyLimit: 100 },
+      },
+    },
+    { id: 'local', type: 'Local', fee: 0, models: ['model-b'] },
+    { id: 'cursor', type: 'Wallet', fee: 20, startDate: '20260101', models: ['*'] },
+  ],
+};
+
+const MIX_CSV = [
+  'model_key,model,provider,path_id,path_name,path_source,class,input,output,cache_write,cache_read,tokens,cost_usd',
+  'model-a,provider/model-a,acme,codex,"Acme Codex",provider:acme,Wallet,600000,240000,0,11160000,12000000,7.75',
+  '',
+].join('\n');
+
+/** A fixture home carrying the priced config and the mix CSV. */
+function pricedRoot({ csv = MIX_CSV } = {}) {
+  const root = fixtureRoot({ roi: ROI, quota: QUOTA, roiConfig: PRICED_CONFIG });
+  if (csv !== null) fs.writeFileSync(path.join(root, 'data', 'ccagg-by-model-path.csv'), csv);
+  return root;
+}
+
+test('getCatalog prices a runnable from the path list and the observed mix', () => {
+  const root = pricedRoot();
+  const catalog = getCatalog({ home: root, now: NOW });
+  const entry = catalog.find((item) => item.id === 'a-model');
+  assert.equal(entry.costSource, 'path-price');
+  assert.equal(entry.costBasis.mixSource, 'observed-path');
+  assert.equal(entry.costBasis.mixTokens, 12000000);
+  assert.equal(entry.costBasis.allowanceScale, 0.2, 'fee 20 / limit 100');
+  const shares = { cacheRead: 11160000 / 12000000, input: 600000 / 12000000, output: 240000 / 12000000 };
+  const expected = (shares.cacheRead * 0.003 + shares.input * 0.15 + shares.output * 0.6) * 0.2;
+  assert.ok(Math.abs(entry.costPerMTok - expected) < 1e-12);
+});
+
+test('a missing mix CSV falls back to the config blend, never an error', () => {
+  const root = pricedRoot({ csv: null });
+  const entry = getCatalog({ home: root, now: NOW }).find((item) => item.id === 'a-model');
+  assert.equal(entry.costSource, 'path-price');
+  assert.equal(entry.costBasis.mixSource, 'default');
+  assert.equal(entry.costBasis.mixTokens, null);
+  assert.ok(entry.costPerMTok > 0);
+});
+
+test('an unparseable mix CSV is the same as no CSV', () => {
+  const root = pricedRoot({ csv: '\u0000not,a,csv\nwith no model_key column\n' });
+  const entry = getCatalog({ home: root, now: NOW }).find((item) => item.id === 'a-model');
+  assert.equal(entry.costBasis.mixSource, 'default');
+});
+
+test('the mix CSV path can be overridden', () => {
+  const root = pricedRoot({ csv: null });
+  const csvFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agentq-mix-')), 'mix.csv');
+  fs.writeFileSync(csvFile, MIX_CSV);
+  const entry = getCatalog({ home: root, now: NOW, mixPath: csvFile }).find((item) => item.id === 'a-model');
+  assert.equal(entry.costBasis.mixSource, 'observed-path');
+  assert.equal(resolvePaths({ home: root, mixPath: csvFile }).mixPath, csvFile);
+  assert.equal(resolvePaths({ home: root }).mixPath, path.join(root, 'data', 'ccagg-by-model-path.csv'));
+});
+
+test('getPathGaps reports both lists from the home', () => {
+  const root = pricedRoot();
+  const report = getPathGaps({ home: root, now: NOW });
+  assert.equal(report.paths.length, 1, 'only the priced path is reported');
+  const [codex] = report.paths;
+  assert.equal(codex.path, 'codex');
+  assert.equal(codex.pathName, 'Acme Codex');
+  assert.equal(codex.fee, 20);
+  assert.deepEqual(codex.missing.map((gap) => gap.modelKey), ['model-gap']);
+  assert.equal(typeof codex.missing[0].costPerMTok, 'number');
+  assert.deepEqual(codex.unpriced, []);
+});
+
+test('getPathGaps without a config reports nothing instead of throwing', () => {
+  const root = fixtureRoot({ roi: ROI, roiConfig: null });
+  assert.deepEqual(getPathGaps({ home: root, now: NOW }).paths, []);
 });

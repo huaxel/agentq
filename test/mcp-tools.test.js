@@ -87,11 +87,11 @@ function tool(name, deps) {
   return found;
 }
 
-test('buildReadTools declares six read-only tools with JSON schemas', () => {
+test('buildReadTools declares seven read-only tools with JSON schemas', () => {
   const { deps } = fakeDeps();
   const tools = buildReadTools(deps);
   assert.deepEqual(tools.map((entry) => entry.name), [
-    'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'list_tasks', 'get_task',
+    'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps', 'list_tasks', 'get_task',
   ]);
   for (const entry of tools) {
     assert.deepEqual(entry.annotations, { readOnlyHint: true });
@@ -543,7 +543,8 @@ test('bin/agentq-mcp.js completes an initialize + tools/list handshake over stdi
   assert.equal(init.result.serverInfo.name, 'agentq');
   assert.equal(list.id, 2);
   assert.deepEqual(list.result.tools.map((entry) => entry.name), [
-    'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'list_tasks', 'get_task',
+    'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps',
+    'list_tasks', 'get_task',
     // dispatch_status is a read tool: it reports a task's state and the log of
     // a worker this server dispatched. dispatch_task stays behind --allow-write.
     'dispatch_status',
@@ -664,4 +665,65 @@ test('bin/agentq-mcp.js --help prints usage and exits zero', async () => {
   assert.match(result.stdout, /agentq MCP server \(read-only, stdio\)/);
   assert.match(result.stdout, /AGENTQ_ORCHESTRATOR_DB/);
   assert.equal(result.stderr, '');
+});
+
+// --- private work and the price-table gap report (W16) ----------------------
+
+test('recommend_model maps private to excludeDataSharing', () => {
+  const { deps, calls } = fakeDeps();
+  tool('recommend_model', deps).handler({ private: true });
+  assert.deepEqual(calls.recommend, [{ tier: 'medium', minIntelligence: undefined, allowUnknownCapacity: false, excludeDataSharing: true }]);
+
+  // The default payload is unchanged: no key is sent when the caller did not ask.
+  const plain = fakeDeps();
+  tool('recommend_model', plain.deps).handler({});
+  assert.equal(Object.hasOwn(plain.calls.recommend[0], 'excludeDataSharing'), false);
+});
+
+test('recommend_for_task maps private to excludeDataSharing for an auto task', () => {
+  const { deps, calls } = fakeDeps();
+  tool('recommend_for_task', deps).handler({ id: 't1', private: true });
+  assert.deepEqual(calls.recommend, [{ tier: 'medium', minIntelligence: undefined, allowUnknownCapacity: false, excludeDataSharing: true }]);
+});
+
+test('list_models reports costBasis and dataSharing', () => {
+  const catalog = [{
+    ...CATALOG[0],
+    costSource: 'path-price',
+    costBasis: {
+      source: 'path-price',
+      mix: { cacheRead: 0.95, cacheWrite: 0, input: 0.05, output: 0 },
+      mixSource: 'observed-path',
+      mixTokens: 41_000_000,
+      peak: true,
+      allowanceScale: 0.1,
+    },
+    dataSharing: true,
+  }];
+  const { deps } = fakeDeps({ getCatalog: () => catalog });
+  const result = tool('list_models', deps).handler({});
+  assert.equal(result.models[0].costSource, 'path-price');
+  assert.equal(result.models[0].costBasis.mixSource, 'observed-path');
+  assert.equal(result.models[0].dataSharing, true);
+});
+
+test('recommend_for_task reports dataSharing for an explicit model', () => {
+  const catalog = [{ ...CATALOG[1], dataSharing: true }];
+  const tasks = [{ ...TASKS[1], model: 'gpt-5' }];
+  const { deps } = fakeDeps({ getCatalog: () => catalog, getTask: () => tasks[0] });
+  const result = tool('recommend_for_task', deps).handler({ id: 't2' });
+  assert.equal(result.mode, 'explicit');
+  assert.equal(result.catalog.dataSharing, true);
+});
+
+test('path_gaps returns the routing core report', () => {
+  const report = { paths: [{ path: 'go', pathName: 'Orbit Go', fee: 10, missing: [], unpriced: [] }] };
+  const { deps } = fakeDeps({ getPathGaps: () => report });
+  assert.deepEqual(tool('path_gaps', deps).handler({}), report);
+  assert.throws(() => tool('path_gaps', deps).handler({ verbose: true }), /Unknown argument/);
+});
+
+test('path_gaps says what is missing when the host wires no gap source', () => {
+  const { deps } = fakeDeps();
+  assert.throws(() => tool('path_gaps', deps).handler({}), /does not expose getPathGaps/);
 });

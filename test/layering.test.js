@@ -81,6 +81,9 @@ const CORE_LIB_LEAVES = new Set([
   'src/lib/model-key.js',
   'src/lib/path-attribution.js',
   'src/lib/path-coverage.js',
+  // The subscription's own price list: pure (no fs, no env, no clock beyond the
+  // injected `now`), and the config validator needs the same shape rules.
+  'src/lib/path-prices.js',
   'src/lib/subscriptions.js',
 ]);
 

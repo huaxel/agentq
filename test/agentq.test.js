@@ -2421,13 +2421,26 @@ test('formatModelRow marks an AA estimate with ~ so it is not read as a score', 
   assert.doesNotMatch(scored, /~/);
 });
 
-test('formatModelRow rounds scores to one decimal and prices to cents', () => {
+test('formatModelRow rounds scores to one decimal and sub-dollar prices to four decimals', () => {
   const row = formatModelRow({
     model: 'qwen3.6-27b-mtp', path: 'local', intelligence: 33.47297297297297, intelligenceSource: 'roi',
     costPerMTok: 0.24903999999999998, capacity: null, recommended: false, reasons: [],
   }, 1);
-  assert.match(row, / 33\.5 +\$0\.25 /);
-  assert.doesNotMatch(row, /33\.472|0\.249/);
+  assert.match(row, / 33\.5 +\$0\.2490 /);
+  assert.doesNotMatch(row, /33\.472|0\.24904/);
+});
+
+test('formatModelRow keeps allowance-scaled prices distinguishable and dollars at cents', () => {
+  const cheap = formatModelRow({
+    model: 'acme/atlas-flash', path: 'go', intelligence: 50, intelligenceSource: 'roi',
+    costPerMTok: 0.0012168, capacity: null, recommended: false, reasons: [],
+  }, 1);
+  assert.match(cheap, /\$0\.0012 /);
+  const dear = formatModelRow({
+    model: 'acme/atlas-large', path: 'go', intelligence: 60, intelligenceSource: 'roi',
+    costPerMTok: 12.3456, capacity: null, recommended: false, reasons: [],
+  }, 1);
+  assert.match(dear, /\$12\.35 /);
 });
 
 // --- stale-quota refresh ---
