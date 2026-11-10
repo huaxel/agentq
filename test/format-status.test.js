@@ -6,12 +6,15 @@
  * Fixed rows and a fixed `now`: the header, 8-character ids, the age units,
  * a spec title without its file path, truncation to at most 120 characters, the
  * `—` model, the waits-on and input-error notes, and the empty `no tasks` case.
+ *
+ * W30 adds `formatQueueSummary`: the one-line queue breakdown, its fixed status
+ * order, skipped zeros, unknown statuses appended last, and the empty queue.
  */
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { formatStatusTable } = require('../src/interfaces/cli/format.js');
+const { formatStatusTable, formatQueueSummary } = require('../src/interfaces/cli/format.js');
 
 // Fixed reference time; rows below are dated relative to it.
 const NOW = new Date('2026-01-01T12:00:00.000Z');
@@ -129,6 +132,47 @@ test('a pending job with an input error gets an input-error note', () => {
 test('an empty list prints `no tasks`', () => {
   assert.equal(formatStatusTable([]), 'no tasks');
   assert.equal(formatStatusTable(null), 'no tasks');
+});
+
+/** The summary counts rows only for their status, so these are all it reads. */
+function counted(...statuses) {
+  return statuses.map((status) => ({ status }));
+}
+
+/** `counted` for n rows sharing a status. */
+function many(status, n) {
+  return counted(...Array.from({ length: n }, () => status));
+}
+
+test('the summary lists statuses in the fixed order, not the order seen', () => {
+  const jobs = counted(
+    'succeeded', 'succeeded', 'failed', 'rejected', 'pending', 'running', 'unverified', 'blocked', 'pending', 'succeeded', 'failed', 'pending', 'running', 'failed', 'succeeded',
+  );
+  assert.equal(
+    formatQueueSummary(jobs),
+    'queue: 2 running, 3 pending, 1 blocked, 3 failed, 1 unverified, 1 rejected, 4 succeeded',
+  );
+});
+
+test('the summary skips statuses with no tasks', () => {
+  // The specification's example: nothing blocked, unverified or rejected.
+  const jobs = [...many('running', 1), ...many('pending', 2), ...many('failed', 3), ...many('succeeded', 8)];
+  assert.equal(formatQueueSummary(jobs), 'queue: 1 running, 2 pending, 3 failed, 8 succeeded');
+});
+
+test('an unknown status is appended after the known ones, alphabetically', () => {
+  const jobs = counted('zombie', 'pending', 'awaiting-review', 'succeeded', 'amputated', 'zombie');
+  assert.equal(
+    formatQueueSummary(jobs),
+    'queue: 1 pending, 1 succeeded, 1 amputated, 1 awaiting-review, 2 zombie',
+  );
+});
+
+test('the summary of an empty queue is an empty string', () => {
+  assert.equal(formatQueueSummary([]), '');
+  assert.equal(formatQueueSummary(null), '');
+  // Rows with no status at all are nothing to count either.
+  assert.equal(formatQueueSummary([{}, { status: null }]), '');
 });
 
 test('a dependency outside the shown rows is looked up in allJobs', () => {

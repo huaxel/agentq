@@ -585,6 +585,43 @@ function formatStatusTable(jobs, { now = new Date(), allJobs = jobs } = {}) {
   return lines.join('\n');
 }
 
+/** The order `formatQueueSummary` counts statuses in: in-flight first. */
+const QUEUE_SUMMARY_ORDER = ['running', 'pending', 'blocked', 'failed', 'unverified', 'rejected', 'succeeded'];
+
+/**
+ * One line describing the whole queue, whatever the table shows:
+ * `queue: 1 running, 2 pending, 3 failed, 8 succeeded`.
+ *
+ * Statuses are counted in QUEUE_SUMMARY_ORDER and zero counts are skipped, so a
+ * queue with nothing blocked never mentions blocked. A status outside that list
+ * (a newer state, or a row the caller passed through) is appended after the
+ * known ones in ordinal alphabetical order — a plain comparison, not a locale
+ * one, so the line is the same on every machine. A row with no status is not
+ * counted: the queue stores one for every task (`tasks.status` is NOT NULL), so
+ * that only happens for a hand-built list. An empty or missing list returns an
+ * empty string: there is nothing to summarise, and the caller prints no line.
+ *
+ * @param {Array<{ status?: string }>} jobs every task in the queue, before filters
+ * @returns {string}
+ */
+function formatQueueSummary(jobs) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return '';
+  const counts = new Map();
+  for (const job of jobs) {
+    const status = job && job.status != null ? String(job.status) : '';
+    if (!status) continue;
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  const extras = [...counts.keys()]
+    .filter((status) => !QUEUE_SUMMARY_ORDER.includes(status))
+    .sort((a, b) => (a === b ? 0 : a < b ? -1 : 1));
+  const parts = [...QUEUE_SUMMARY_ORDER, ...extras]
+    .filter((status) => counts.has(status))
+    .map((status) => `${counts.get(status)} ${status}`);
+  if (parts.length === 0) return '';
+  return `queue: ${parts.join(', ')}`;
+}
+
 module.exports = {
   capacityText,
   intelligenceCell,
@@ -606,6 +643,7 @@ module.exports = {
   truncateTo,
   summarizeCosts,
   formatStatusTable,
+  formatQueueSummary,
   compactAge,
   statusTitle,
   statusNote,

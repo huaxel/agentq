@@ -42,6 +42,7 @@ const {
   formatJobBlock,
   summarizeCosts,
   formatStatusTable,
+  formatQueueSummary,
 } = require('./format.js');
 
 const { agentqHome, homeConfigStatus, homeDataPath, initHome } = require('../../lib/home.js');
@@ -69,7 +70,7 @@ function usage() {
   node bin/agentq.js [global opts] review list [--model ID] [--json]
   node bin/agentq.js [global opts] review stats [--json]
   node bin/agentq.js [global opts] paths gaps [--json]
-  node bin/agentq.js [global opts] status [--status S] [--kind K] [--limit N] [--json]
+  node bin/agentq.js [global opts] status [--active | --status S] [--kind K] [--limit N] [--json]
   node bin/agentq.js [global opts] show --id ID [--json]
   node bin/agentq.js [global opts] save-workflow --name NAME --file PATH [--json]
   node bin/agentq.js [global opts] list-workflows [--json]
@@ -127,6 +128,11 @@ function usage() {
     --quota PATH             Quota snapshot used for capacity (default: <home>/data/quota.json)
     --private                Exclude paths whose price entry says the provider may
                              retain prompts (dataSharing: true)
+
+  Queue status:
+    agentq status            Tasks newest first, then a summary line counting every
+                             task in the queue by status. --active keeps only the
+                             unfinished ones: pending, blocked or running.
 
   Path prices:
     agentq paths gaps        Priced models with no runnable on their path, and
@@ -251,6 +257,7 @@ function parseArgs(argv) {
     else if (flag === '--parallel') options.parallel = Number(needValue(args, flag));
     else if (flag === '--max-age-min' || flag === '--max-age') options.maxAge = Number(needValue(args, flag));
     else if (flag === '--status') options.status = needValue(args, flag);
+    else if (flag === '--active') options.active = true;
     else if (flag === '--kind') { options.kind = needValue(args, flag); options.kindExplicit = true; }
     else if (flag === '--limit') options.limit = Number(needValue(args, flag));
     else if (flag === '--workflow') options.workflow = true;
@@ -542,13 +549,18 @@ function print(result, json) {
 /** Valid values for `status --status`; the same set the menu counts. */
 const STATUS_VALUES = ['pending', 'blocked', 'running', 'succeeded', 'failed', 'unverified', 'rejected'];
 
+/** Unfinished statuses, the ones `status --active` keeps. */
+const ACTIVE_STATUSES = ['pending', 'blocked', 'running'];
+
 /**
  * `agentq status` — a readable, filterable table.
  *
- * Filtering (status, kind) and the limit apply to both output shapes, but only
- * when given: `--json` with no flags must stay byte-for-byte identical to the
- * old `JSON.stringify(status())`. The text table is newest-first and carries a
- * `showing N of M` footer whenever filters or the limit cut rows.
+ * Filtering (status, kind, --active) and the limit apply to both output shapes,
+ * but only when given: `--json` with no flags must stay byte-for-byte identical
+ * to the old `JSON.stringify(status())`. The text table is newest-first and
+ * carries a `showing N of M` footer whenever filters or the limit cut rows,
+ * then a `queue:` summary of the whole queue regardless of what is shown.
+ * `--active` (unfinished tasks only) and `--status` are mutually exclusive.
  *
  * @param {import('../../queue/sources.js').SqliteSource} source
  * @param {Record<string, any>} options
@@ -556,6 +568,11 @@ const STATUS_VALUES = ['pending', 'blocked', 'running', 'succeeded', 'failed', '
  */
 function commandStatus(source, options) {
   const all = source.status();
+  // A flag-vs-flag conflict is checked before the value, so `--active --status
+  // anything` says which two flags cannot be combined.
+  if (options.active && options.status != null) {
+    throw new Error('--active and --status are mutually exclusive');
+  }
   if (options.status != null && !STATUS_VALUES.includes(options.status)) {
     throw new Error(
       `invalid --status ${options.status}: expected one of ${STATUS_VALUES.join(', ')}`,
@@ -565,12 +582,14 @@ function commandStatus(source, options) {
   // defaults `options.kind` to the global kind, which must not become a filter.
   const statusFilter = options.status != null ? options.status : null;
   const kindFilter = options.kindExplicit ? options.kind : null;
+  const activeFilter = Boolean(options.active);
   if (options.limit != null && !(Number.isInteger(options.limit) && options.limit > 0)) {
     throw new Error('--limit must be a positive integer');
   }
   const limit = options.limit != null ? options.limit : 20;
 
   const filtered = all.filter((job) => {
+    if (activeFilter && !ACTIVE_STATUSES.includes(job.status)) return false;
     if (statusFilter && job.status !== statusFilter) return false;
     if (kindFilter && job.kind !== kindFilter) return false;
     return true;
@@ -598,6 +617,10 @@ function commandStatus(source, options) {
   if (shown.length < all.length) {
     process.stdout.write(`showing ${shown.length} of ${all.length}\n`);
   }
+  // The summary is the queue as a whole, so it stays put when a filter or the
+  // limit cuts the table. An empty queue has nothing to count: `no tasks` only.
+  const summary = formatQueueSummary(all);
+  if (summary) process.stdout.write(`${summary}\n`);
   return 0;
 }
 
