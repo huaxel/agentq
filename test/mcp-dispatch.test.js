@@ -239,6 +239,18 @@ test('dispatch_task takes no boundary arguments from the client', () => {
   }
 });
 
+test('dispatch_task input cannot set the internal model-choice marker', () => {
+  // The duplicate-record suppressor is an env var the dispatcher sets in the
+  // worker's spawn environment, not a tool argument. Naming it (in any case
+  // form) from the client is rejected as an unknown argument, so a caller
+  // cannot suppress the `model-chosen` audit event nor smuggle the marker in.
+  const { deps } = fakeDeps();
+  const entry = tool('dispatch_task', deps);
+  assert.throws(() => entry.handler({ id: 't1', AGENTQ_MODEL_CHOICE_RECORDED: '1' }), /Unknown argument/);
+  assert.throws(() => entry.handler({ id: 't1', model_choice_recorded: '1' }), /Unknown argument/);
+  assert.throws(() => entry.handler({ id: 't1', 'env': { AGENTQ_MODEL_CHOICE_RECORDED: '1' } }), /Unknown argument/);
+});
+
 // --- dispatch_task: pre-checks (no false "dispatched") ---
 
 test('dispatch_task runs admission with the server boundary before spawning', () => {
@@ -562,6 +574,10 @@ test('dispatch_task spawns a detached agentq run --id with the dispatch worker i
   // The worker gets an explicit environment (it needs provider auth).
   assert.equal(call.options.env.PATH, process.env.PATH);
   assert.equal(call.options.env.HOME, process.env.HOME);
+  // Dispatch already recorded this task's `model-chosen` event, so it marks
+  // the spawned worker's environment to skip the duplicate record. The marker
+  // is internal: it lives in the spawn env, never in dispatch_task's input.
+  assert.equal(call.options.env.AGENTQ_MODEL_CHOICE_RECORDED, '1');
 
   // The log exists, is private, and its directory is private too.
   const stat = fs.statSync(result.log);

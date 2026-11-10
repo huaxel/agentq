@@ -896,10 +896,23 @@ class SqliteSource {
     // Audit how this claim's model was chosen. `requested` is the caller's
     // --model for THIS claim; without one the stored model decided, which is
     // either a pin or (for 'auto') a routed choice.
-    recordModelChoice(this.db, claimed, resolved, {
-      requestedModel: requested,
-      tier: options.tier ?? storedTier(task),
-    });
+    //
+    // When dispatch spawned this worker it already recorded the decision (with
+    // the correct chosenBy and shortlist roles) and signalled that through the
+    // AGENTQ_MODEL_CHOICE_RECORDED environment marker. Recording it again here
+    // would write a SECOND `model-chosen` event that is mislabelled: the worker
+    // was handed --model, so it would read chosenBy: 'caller' with empty roles
+    // even when dispatch routed it 'auto'. The marker is internal (set by
+    // dispatch in the spawn env, never by dispatch_task's input), so a `run
+    // --id` invoked plainly still records exactly as it always has. A retry
+    // does NOT carry this marker through code: claimRetry re-resolves the model
+    // and is a new decision, so it always records its own event below.
+    if (process.env.AGENTQ_MODEL_CHOICE_RECORDED !== '1') {
+      recordModelChoice(this.db, claimed, resolved, {
+        requestedModel: requested,
+        tier: options.tier ?? storedTier(task),
+      });
+    }
     return taskToJob(claimed);
   }
 

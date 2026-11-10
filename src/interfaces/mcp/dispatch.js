@@ -564,7 +564,15 @@ function buildDispatchTools(deps) {
             // from the environment (and from files under HOME). A curated
             // subset would break model auth, so the full environment is
             // forwarded deliberately; see docs/mcp.md.
-            env: { ...process.env },
+            //
+            // AGENTQ_MODEL_CHOICE_RECORDED is an INTERNAL marker: dispatch has
+            // already recorded this task's `model-chosen` event (with the
+            // correct chosenBy and shortlist roles), so the worker it spawns
+            // must not record a second, mislabelled one. The marker travels in
+            // the worker's environment only — it is never part of
+            // dispatch_task's input schema, so a caller cannot suppress the
+            // audit event nor smuggle the marker in.
+            env: { ...process.env, AGENTQ_MODEL_CHOICE_RECORDED: '1' },
           });
         } catch (error) {
           try { fs.rmSync(logPath, { force: true }); } catch { /* best effort */ }
