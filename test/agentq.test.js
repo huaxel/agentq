@@ -745,6 +745,24 @@ test('CUA mode selects only the feedback executor and has exclusive CLI options'
   assert.throws(() => parseArgs(['drain', '--cua', '--parallel', '2']), /one concurrent VM/i);
 });
 
+test('--help works after any command', () => {
+  for (const args of [
+    ['review', '--help'],
+    ['review', 'add', '--help'],
+    ['enqueue', '-h'],
+    ['paths', 'gaps', '--help'],
+    ['enqueue', '--help'],
+  ]) {
+    const result = run(args);
+    assert.equal(result.exitCode, 0, `${args.join(' ')}: ${result.stderr}`);
+    assert.match(result.stdout, /Usage/);
+    assert.equal(result.stderr, '');
+  }
+  const bogus = run(['review', '--bogus']);
+  assert.notEqual(bogus.exitCode, 0);
+  assert.match(bogus.stderr, /Unknown option for review/);
+});
+
 test('resolveExecutor prefers the job-persisted executor', () => {
   assert.equal(
     resolveExecutor({ repo_path: '/tmp/target-repo', executor: 'src/runners/jules-issue.js' }, {}),

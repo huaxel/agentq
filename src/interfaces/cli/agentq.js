@@ -181,11 +181,15 @@ function parseArgs(argv) {
   const options = {};
   // `agentq home [init]`, `agentq paths gaps` and `agentq review <action>` take a
   // bare subcommand, not a flag.
-  if ((command === 'home' || command === 'paths' || command === 'review') && args[0] && !args[0].startsWith('--')) {
+  if ((command === 'home' || command === 'paths' || command === 'review') && args[0] && !args[0].startsWith('--') && args[0] !== '-h') {
     options.action = args.shift();
   }
   while (args.length) {
     const flag = args.shift();
+    // `--help`/`-h` after the command (or after a bare subcommand) is a help
+    // request, not an option: print usage and exit 0, even when required
+    // options are missing.
+    if (flag === '--help' || flag === '-h') return { command: 'help', global, options: {} };
     if (flag === '--json') options.json = true;
     else if (flag === '--repo') options.repo = needValue(args, flag);
     else if (flag === '--issue') options.issue = needValue(args, flag);
