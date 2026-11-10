@@ -471,6 +471,120 @@ function summarizeCosts(jobs) {
   return { jobs: count, total: Math.round(total * 10000) / 10000 };
 }
 
+/**
+ * Compact age against a fixed `now`: seconds under a minute, then minutes,
+ * hours, days. Anything that is not a readable time renders as `—`.
+ *
+ * @param {string|number|Date} createdAt
+ * @param {string|number|Date} now
+ * @returns {string}
+ */
+function compactAge(createdAt, now) {
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const createdMs = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
+  if (!Number.isFinite(createdMs) || !Number.isFinite(nowMs)) return '—';
+  const ms = nowMs - createdMs;
+  const s = Math.floor(ms / 1000);
+  if (s < 0) return '0s';
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/**
+ * The title a status row shows: an issue task is `issue N`, a spec task is its
+ * pinned input title (already stripped of its file path by the pinner), and
+ * anything else falls back to its kind.
+ *
+ * @param {{ issue_number?: number|null, task_input?: { title?: string }|null, kind?: string }} job
+ * @returns {string}
+ */
+function statusTitle(job) {
+  if (job.issue_number != null) return `issue ${job.issue_number}`;
+  if (job.task_input && job.task_input.title) return job.task_input.title;
+  return job.kind || 'task';
+}
+
+/**
+ * A short trailing note for a row: a pending job whose input failed validation,
+ * or a job that still waits on a dependency that has not succeeded. The
+ * dependency statuses come from the other rows in the same list (the queue's
+ * `status()` returns every task), so a dep that is missing from the list is
+ * treated as not-yet-succeeded and still reported as waiting.
+ *
+ * @param {{ input_error?: string|null, depends_on?: string[] }} job
+ * @param {Map<string, string>} statusById id -> status for this list
+ * @returns {string|null}
+ */
+function statusNote(job, statusById) {
+  if (job.input_error) return 'input error';
+  if (Array.isArray(job.depends_on) && job.depends_on.length) {
+    const waiting = job.depends_on.find((depId) => {
+      const depStatus = statusById.get(String(depId));
+      return depStatus == null || depStatus !== 'succeeded';
+    });
+    if (waiting != null) return `waits on ${String(waiting).slice(0, 8)}`;
+  }
+  return null;
+}
+
+/**
+ * One fixed-width status row (used for the header and for data rows). The model
+ * column is padded so the title column always starts at the same offset; the
+ * note that may follow the title is free-form and extends past it.
+ *
+ * @param {string} id
+ * @param {string} status
+ * @param {string} kind
+ * @param {string} age
+ * @param {string} model
+ * @param {string} title
+ * @param {number} [modelWidth] the model column width, sized to the rows shown
+ * @returns {string}
+ */
+function statusRow(id, status, kind, age, model, title, modelWidth = 24) {
+  return `${String(id).padEnd(8)}  ${String(status).padEnd(10)} ${String(kind).padEnd(12)} ${String(age).padEnd(4)} ${String(model).padEnd(modelWidth)} ${title}`;
+}
+
+/**
+ * The `agentq status` text table: one row per job, newest-first ordering left to
+ * the caller. Columns are id (8 chars), status, kind, age, model (or `—`), and
+ * title. The title is cut to keep the whole row at most 120 characters, leaving
+ * room for any trailing note. An empty list prints `no tasks`.
+ *
+ * @param {Array<Record<string, any>>} jobs
+ * @param {{ now?: string|number|Date }} [options]
+ * @returns {string}
+ */
+function formatStatusTable(jobs, { now = new Date(), allJobs = jobs } = {}) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return 'no tasks';
+  // Dependency statuses come from the whole queue, not just the rows shown:
+  // a filtered or limited table must not report a succeeded dep as waiting.
+  const statusById = new Map((Array.isArray(allJobs) ? allJobs : jobs).map((job) => [String(job.id), job.status]));
+  // The model column fits the longest model shown, so titles stay aligned.
+  const modelWidth = Math.max(5, ...jobs.map((job) => (job.model ? String(job.model).length : 1)));
+  const lines = [statusRow('id', 'status', 'kind', 'age', 'model', 'title', modelWidth)];
+  const MAX = 120;
+  for (const job of jobs) {
+    const id = String(job.id).slice(0, 8);
+    const status = job.status == null ? '—' : String(job.status);
+    const kind = job.kind == null ? '—' : String(job.kind);
+    const age = job.created_at == null ? '—' : compactAge(job.created_at, now);
+    const model = job.model ? String(job.model) : '—';
+    const title = statusTitle(job);
+    const note = statusNote(job, statusById);
+    const noteStr = note ? `  ${note}` : '';
+    const base = statusRow(id, status, kind, age, model, '', modelWidth);
+    const budget = MAX - base.length - noteStr.length;
+    const shownTitle = budget > 0 ? truncateTo(title, budget) : '';
+    lines.push(`${base}${shownTitle}${noteStr}`);
+  }
+  return lines.join('\n');
+}
+
 module.exports = {
   capacityText,
   intelligenceCell,
@@ -491,4 +605,8 @@ module.exports = {
   showCell,
   truncateTo,
   summarizeCosts,
+  formatStatusTable,
+  compactAge,
+  statusTitle,
+  statusNote,
 };

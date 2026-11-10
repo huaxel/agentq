@@ -41,6 +41,7 @@ const {
   formatCost,
   formatJobBlock,
   summarizeCosts,
+  formatStatusTable,
 } = require('./format.js');
 
 const { agentqHome, homeConfigStatus, homeDataPath, initHome } = require('../../lib/home.js');
@@ -68,7 +69,7 @@ function usage() {
   node bin/agentq.js [global opts] review list [--model ID] [--json]
   node bin/agentq.js [global opts] review stats [--json]
   node bin/agentq.js [global opts] paths gaps [--json]
-  node bin/agentq.js [global opts] status [--json]
+  node bin/agentq.js [global opts] status [--status S] [--kind K] [--limit N] [--json]
   node bin/agentq.js [global opts] show --id ID [--json]
   node bin/agentq.js [global opts] save-workflow --name NAME --file PATH [--json]
   node bin/agentq.js [global opts] list-workflows [--json]
@@ -249,6 +250,9 @@ function parseArgs(argv) {
     else if (flag === '--timeout') options.timeout = Number(needValue(args, flag)) * 1000; // seconds → ms
     else if (flag === '--parallel') options.parallel = Number(needValue(args, flag));
     else if (flag === '--max-age-min' || flag === '--max-age') options.maxAge = Number(needValue(args, flag));
+    else if (flag === '--status') options.status = needValue(args, flag);
+    else if (flag === '--kind') { options.kind = needValue(args, flag); options.kindExplicit = true; }
+    else if (flag === '--limit') options.limit = Number(needValue(args, flag));
     else if (flag === '--workflow') options.workflow = true;
     else if (flag === '--workflow-name') options.workflowName = needValue(args, flag);
     else if (flag === '--name') options.name = needValue(args, flag);
@@ -533,6 +537,68 @@ function print(result, json) {
   else if (result.id) process.stdout.write(`#${result.id} ${result.status}${result.exitCode != null ? ` exit=${result.exitCode}` : ''}\n`);
   else if (result.recovered != null) process.stdout.write(`recovered ${result.recovered} stale job(s) (${result.skipped} still running)\n`);
   else process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+/** Valid values for `status --status`; the same set the menu counts. */
+const STATUS_VALUES = ['pending', 'blocked', 'running', 'succeeded', 'failed', 'unverified', 'rejected'];
+
+/**
+ * `agentq status` — a readable, filterable table.
+ *
+ * Filtering (status, kind) and the limit apply to both output shapes, but only
+ * when given: `--json` with no flags must stay byte-for-byte identical to the
+ * old `JSON.stringify(status())`. The text table is newest-first and carries a
+ * `showing N of M` footer whenever filters or the limit cut rows.
+ *
+ * @param {import('../../queue/sources.js').SqliteSource} source
+ * @param {Record<string, any>} options
+ * @returns {number} process exit code
+ */
+function commandStatus(source, options) {
+  const all = source.status();
+  if (options.status != null && !STATUS_VALUES.includes(options.status)) {
+    throw new Error(
+      `invalid --status ${options.status}: expected one of ${STATUS_VALUES.join(', ')}`,
+    );
+  }
+  // `--kind` only filters when the user passes it; the local source otherwise
+  // defaults `options.kind` to the global kind, which must not become a filter.
+  const statusFilter = options.status != null ? options.status : null;
+  const kindFilter = options.kindExplicit ? options.kind : null;
+  if (options.limit != null && !(Number.isInteger(options.limit) && options.limit > 0)) {
+    throw new Error('--limit must be a positive integer');
+  }
+  const limit = options.limit != null ? options.limit : 20;
+
+  const filtered = all.filter((job) => {
+    if (statusFilter && job.status !== statusFilter) return false;
+    if (kindFilter && job.kind !== kindFilter) return false;
+    return true;
+  });
+
+  if (options.json) {
+    // `--json` keeps source.status()'s order (oldest first) and fields; the
+    // limit only applies when explicitly requested, so the no-flag shape is
+    // unchanged.
+    const out = options.limit != null ? filtered.slice(0, limit) : filtered;
+    process.stdout.write(`${JSON.stringify(out)}\n`);
+    return 0;
+  }
+
+  // Text: newest first. created_at can tie; fall back to id so the order is
+  // stable and not UUID-dependent.
+  const ordered = [...filtered].sort((a, b) => {
+    if (a.created_at !== b.created_at) {
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    }
+    return (b.id || '').localeCompare(a.id || '');
+  });
+  const shown = ordered.slice(0, limit);
+  process.stdout.write(`${formatStatusTable(shown, { now: new Date(), allJobs: all })}\n`);
+  if (shown.length < all.length) {
+    process.stdout.write(`showing ${shown.length} of ${all.length}\n`);
+  }
+  return 0;
 }
 
 /** Print admission refusals: the queue is not empty, it is unrunnable here. */
@@ -1028,8 +1094,7 @@ async function main(argv = process.argv.slice(2)) {
       );
     }
     if (command === 'status') {
-      print(source.status(), options.json);
-      return 0;
+      return commandStatus(source, options);
     }
     if (command === 'run-next') {
       const result = await runNext(source, options);

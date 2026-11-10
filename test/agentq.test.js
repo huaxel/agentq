@@ -187,10 +187,11 @@ test('enqueue --spec stores a spec task with the requested tier', () => {
     handle.close();
   }
 
-  // status names the spec by title and file.
+  // status names the spec by its title, without the file path.
   const listed = run(['--db', db, 'status']);
   assert.equal(listed.exitCode, 0, listed.stderr);
-  assert.match(listed.stdout, new RegExp(`spec: Local spec \\(${path.resolve(spec).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`));
+  assert.match(listed.stdout, /\bpending\s+spec\b.*\bLocal spec$/m);
+  assert.doesNotMatch(listed.stdout, /spec\.md/);
 });
 
 test('enqueue requires exactly one of --issue or --spec', () => {
