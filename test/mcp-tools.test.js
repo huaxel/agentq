@@ -87,11 +87,11 @@ function tool(name, deps) {
   return found;
 }
 
-test('buildReadTools declares seven read-only tools with JSON schemas', () => {
+test('buildReadTools declares eight read-only tools with JSON schemas', () => {
   const { deps } = fakeDeps();
   const tools = buildReadTools(deps);
   assert.deepEqual(tools.map((entry) => entry.name), [
-    'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps', 'list_tasks', 'get_task',
+    'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps', 'track_records', 'list_tasks', 'get_task',
   ]);
   for (const entry of tools) {
     assert.deepEqual(entry.annotations, { readOnlyHint: true });
@@ -544,7 +544,7 @@ test('bin/agentq-mcp.js completes an initialize + tools/list handshake over stdi
   assert.equal(list.id, 2);
   assert.deepEqual(list.result.tools.map((entry) => entry.name), [
     'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps',
-    'list_tasks', 'get_task',
+    'track_records', 'list_tasks', 'get_task',
     // dispatch_status is a read tool: it reports a task's state and the log of
     // a worker this server dispatched. dispatch_task stays behind --allow-write.
     'dispatch_status',

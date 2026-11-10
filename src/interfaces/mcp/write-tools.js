@@ -38,14 +38,29 @@ const {
   shapeTask,
   admissionJob,
 } = require('./shape.js');
+const { REVIEW_TIERS, REVIEW_VERDICTS } = require('../../core/track-record.js');
 
 /** Names of the tools this module builds. */
-const WRITE_TOOL_NAMES = ['enqueue_task', 'claim_task', 'complete_task'];
+const WRITE_TOOL_NAMES = ['enqueue_task', 'claim_task', 'complete_task', 'review_task'];
 
 const ENQUEUE_KINDS = ['prompt', 'github_issue'];
 const COMPLETE_STATUSES = ['succeeded', 'failed'];
 const MAX_SUMMARY_CHARS = 4000;
 const MAX_DEPENDS_ON = 20;
+
+/**
+ * Statuses a task may be reviewed in.
+ *
+ * The queue has no `done`: a finished success is `succeeded` and a finished
+ * failure is `failed`. Anything still pending, running, unverified or rejected
+ * has no outcome to review yet, so the review is refused rather than recorded
+ * against work nobody has seen.
+ */
+const REVIEWABLE_STATUSES = ['succeeded', 'failed'];
+
+/** Tier assumed when neither the argument nor the dispatch event names one. */
+const DEFAULT_REVIEW_TIER = 'medium';
+const MAX_NOTE_CHARS = 2000;
 
 /** Kinds a self-claiming MCP caller must never take. */
 const CLAIM_EXCLUDED_KINDS = ['feedback'];
@@ -59,6 +74,8 @@ const CLAIM_TRUST_LEVELS = ['trusted_agent'];
  * @property {(options: Record<string, any>) => Record<string, any> | null} claimNextTask
  * @property {(id: string, result: Record<string, any>, options: { claimToken: string }) => void} completeTask
  * @property {(id: string) => Record<string, any> | undefined} getTask
+ * @property {(id: string) => Array<Record<string, any>>} listTaskEvents task events, oldest first
+ * @property {(review: Record<string, any>) => Record<string, any>} addReview
  * @property {(repo: string, issueNumber: number) => Record<string, any> | Promise<Record<string, any>>} captureIssueInput
  * @property {(tier: string) => { model: string, provider?: string|null }} resolveAutoModel
  * @property {number} [pid] process id used for the default worker id
@@ -148,7 +165,7 @@ function requiredRepoPath(args, key) {
  */
 function buildWriteTools(deps) {
   if (!deps || typeof deps !== 'object') throw new TypeError('buildWriteTools requires a deps object');
-  for (const key of ['createTask', 'claimNextTask', 'completeTask', 'getTask', 'captureIssueInput', 'resolveAutoModel']) {
+  for (const key of ['createTask', 'claimNextTask', 'completeTask', 'getTask', 'listTaskEvents', 'addReview', 'captureIssueInput', 'resolveAutoModel']) {
     if (typeof (/** @type {any} */ (deps)[key]) !== 'function') {
       throw new TypeError(`buildWriteTools: deps.${key} must be a function`);
     }
@@ -453,7 +470,121 @@ function buildWriteTools(deps) {
         };
       },
     },
+    {
+      name: 'review_task',
+      description:
+        'Record what you thought of what a model produced for a finished task. This is an '
+        + 'outcome review, not a status change: it never re-runs, re-pends or completes anything. '
+        + 'The model is the one the task actually ran on (the latest model-chosen event, else '
+        + 'the task\'s stored model); the tier is the argument, else the tier recorded at dispatch. '
+        + 'Only a succeeded or failed task can be reviewed. Reviews fold into per-model track '
+        + 'records that inform routing, and a strong record can make a model with no '
+        + 'intelligence score eligible. Returns the recorded review.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 128, description: 'Task id.' },
+          verdict: {
+            type: 'string',
+            enum: REVIEW_VERDICTS,
+            description: '"accepted" (usable as is), "accepted-with-fixes" (usable after edits), or "rejected".',
+          },
+          note: {
+            type: 'string',
+            maxLength: MAX_NOTE_CHARS,
+            description: `Short note on what was right or wrong (max ${MAX_NOTE_CHARS} characters).`,
+          },
+          tier: {
+            type: 'string',
+            enum: REVIEW_TIERS,
+            description: 'Tier the work is judged at. Defaults to the tier recorded at dispatch, else medium.',
+          },
+        },
+        required: ['id', 'verdict'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      handler(args) {
+        assertKnownArgs(args, ['id', 'verdict', 'note', 'tier']);
+        const id = requiredString(args, 'id', { max: 128 });
+        const verdict = optionalEnum(args, 'verdict', REVIEW_VERDICTS);
+        if (!verdict) {
+          throw invalidArgument(`verdict is required and must be one of: ${REVIEW_VERDICTS.join(', ')}`);
+        }
+        const note = args.note === undefined || args.note === null
+          ? null
+          : requiredString(args, 'note', { max: MAX_NOTE_CHARS });
+        const requestedTier = optionalEnum(args, 'tier', REVIEW_TIERS);
+
+        const task = deps.getTask(id);
+        if (!task) throw new Error(`Task not found: ${id}`);
+        const status = typeof task.status === 'string' ? task.status : 'unknown';
+        if (!REVIEWABLE_STATUSES.includes(status)) {
+          throw invalidArgument(
+            `task ${id} is ${status}: only a ${REVIEWABLE_STATUSES.join(' or ')} task has an outcome to review`,
+          );
+        }
+
+        // The dispatch event is the audit trail of what actually ran: a task
+        // queued as "auto" stores 'auto', so its stored model says nothing.
+        const chosen = latestModelChoice(deps.listTaskEvents(id));
+        const model = chosen.model ?? (typeof task.model === 'string' && task.model.trim() && task.model !== 'auto'
+          ? task.model.trim()
+          : null);
+        if (!model) {
+          throw new Error(`task ${id} has no recorded model: nothing to attribute the review to`);
+        }
+        const tier = requestedTier ?? chosen.tier ?? DEFAULT_REVIEW_TIER;
+
+        const review = deps.addReview({
+          model,
+          tier,
+          verdict,
+          taskId: id,
+          note,
+          reviewer: 'mcp',
+        });
+        return {
+          id,
+          model,
+          tier,
+          verdict,
+          review,
+        };
+      },
+    },
   ];
+}
+
+/**
+ * The model and tier from the most recent `model-chosen` event.
+ *
+ * The payload is stored as JSON text; an unreadable or absent payload simply
+ * contributes nothing, so the caller falls back to the task row.
+ *
+ * @param {Array<Record<string, any>>|null|undefined} events oldest first
+ * @returns {{ model: string|null, tier: string|null }}
+ */
+function latestModelChoice(events) {
+  const rows = Array.isArray(events) ? events : [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (!row || row.event !== 'model-chosen') continue;
+    let payload = row.payload;
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        payload = null;
+      }
+    }
+    if (!payload || typeof payload !== 'object') return { model: null, tier: null };
+    return {
+      model: typeof payload.model === 'string' && payload.model ? payload.model : null,
+      tier: typeof payload.tier === 'string' && REVIEW_TIERS.includes(payload.tier) ? payload.tier : null,
+    };
+  }
+  return { model: null, tier: null };
 }
 
 module.exports = {
@@ -467,4 +598,7 @@ module.exports = {
   MAX_DEPENDS_ON,
   CLAIM_EXCLUDED_KINDS,
   CLAIM_TRUST_LEVELS,
+  REVIEWABLE_STATUSES,
+  DEFAULT_REVIEW_TIER,
+  latestModelChoice,
 };

@@ -12,9 +12,12 @@ const {
   runVerify,
 } = require('../../runners/execute.js');
 const { jobWorktreePath } = require('../../queue/job-state.js');
-const { coverageIssues, getPathGaps, recommend, resolvePaths } = require('../../core/snapshot.js');
+const { coverageIssues, getPathGaps, getTrackRecordPolicy, recommend, resolvePaths } = require('../../core/snapshot.js');
 const { degradedMarkers } = require('../../core/routing.js');
 const { loadPathHealthFile } = require('../../queue/path-health.js');
+const { loadReviewsFile, loadTrackRecords, loadTrackRecordsFile } = require('../../queue/track-records.js');
+const { loadRunnables } = require('../../core/catalog.js');
+const { REVIEW_TIERS, REVIEW_VERDICTS, trackRecordStats } = require('../../core/track-record.js');
 const { refreshQuotaIfStale } = require('../../lib/quota-refresh.js');
 const { DEFAULT_TIER, normalizeTier, summarizeRejections } = require('../../core/auto-model.js');
 const { isSqliteBusy } = require('../../queue/db-helpers.js');
@@ -31,6 +34,7 @@ const {
   formatModelTable,
   formatOptionsTable,
   formatGapReport,
+  formatTrackRecordTable,
   truncateRepo,
   formatCost,
   formatJobBlock,
@@ -57,6 +61,9 @@ function usage() {
   node bin/agentq.js [global opts] recover [--max-age-min N] [--json]
   node bin/agentq.js [global opts] prune [--force] [--json]
   node bin/agentq.js [global opts] pick [--tier small|medium|big] [--quota PATH] [--threshold N] [--private] [--json]
+  node bin/agentq.js [global opts] review add --model ID --tier T --verdict V [--task ID] [--note TEXT] [--reviewer NAME] [--json]
+  node bin/agentq.js [global opts] review list [--model ID] [--json]
+  node bin/agentq.js [global opts] review stats [--json]
   node bin/agentq.js [global opts] paths gaps [--json]
   node bin/agentq.js [global opts] status [--json]
   node bin/agentq.js [global opts] save-workflow --name NAME --file PATH [--json]
@@ -96,6 +103,16 @@ function usage() {
   Path prices:
     agentq paths gaps        Priced models with no runnable on their path, and
                              runnables on a priced path with no price entry
+
+  Track records (outcome reviews):
+    agentq review add        Record what a model produced: --tier small|medium|big,
+                             --verdict accepted|accepted-with-fixes|rejected.
+                             --model must be a known runnable; --task is optional
+                             (work outside the queue has no task id).
+    agentq review list       Reviews, newest first (--model to filter).
+    agentq review stats      The per-(model, tier) track records routing uses.
+                             A record with enough reviews can make an unscored
+                             model eligible; it never reorders scored models.
 
   Home:
     Everything personal lives outside the checkout, in $AGENTQ_HOME
@@ -154,8 +171,9 @@ function parseArgs(argv) {
 
   const command = args.shift() || 'help';
   const options = {};
-  // `agentq home [init]` and `agentq paths gaps` take a bare subcommand, not a flag.
-  if ((command === 'home' || command === 'paths') && args[0] && !args[0].startsWith('--')) {
+  // `agentq home [init]`, `agentq paths gaps` and `agentq review <action>` take a
+  // bare subcommand, not a flag.
+  if ((command === 'home' || command === 'paths' || command === 'review') && args[0] && !args[0].startsWith('--')) {
     options.action = args.shift();
   }
   while (args.length) {
@@ -165,6 +183,10 @@ function parseArgs(argv) {
     else if (flag === '--issue') options.issue = needValue(args, flag);
     else if (flag === '--id') options.id = needValue(args, flag);
     else if (flag === '--model') options.model = needValue(args, flag);
+    else if (flag === '--task') options.task = needValue(args, flag);
+    else if (flag === '--verdict') options.verdict = needValue(args, flag);
+    else if (flag === '--note') options.note = needValue(args, flag);
+    else if (flag === '--reviewer') options.reviewer = needValue(args, flag);
     else if (flag === '--base') options.base = needValue(args, flag);
     else if (flag === '--depends-on') options.dependsOn = needValue(args, flag);
     else if (flag === '--untrusted') options.untrusted = true;
@@ -556,6 +578,9 @@ async function commandPick(global, options) {
     tier,
     excludeDataSharing: options.private === true,
     pathHealth: loadPathHealthFile(global.db),
+    // Outcome reviews live in the same queue file --db names. Read-only: a
+    // missing queue is no records, never an error.
+    trackRecords: loadTrackRecordsFile(global.db, { runnablesPath: resolvePaths({}).runnablesPath }),
   });
   if (options.json) {
     print({ tier, ...decision }, true);
@@ -591,6 +616,93 @@ function commandPaths(options) {
     return 0;
   }
   process.stdout.write(`${formatGapReport(report)}\n`);
+  return 0;
+}
+
+/**
+ * `agentq review <action>`: record an outcome review, or read the reviews and
+ * the track records they fold into.
+ *
+ * A review is the caller's verdict on what a model produced. It is recorded
+ * here (and over MCP by `review_task`) and never changes a task's status: the
+ * queue records what happened, the review records what was thought of it.
+ */
+function commandReview(global, options) {
+  if (options.action === 'add') return commandReviewAdd(global, options);
+  if (options.action === 'list') return commandReviewList(global, options);
+  if (options.action === 'stats') return commandReviewStats(global, options);
+  throw new Error(`unknown review command: ${options.action ?? '(none)'} (expected add, list or stats)`);
+}
+
+function commandReviewAdd(global, options) {
+  if (!options.model) throw new Error('review add requires --model');
+  if (!options.tier) throw new Error(`review add requires --tier (${REVIEW_TIERS.join('|')})`);
+  if (!options.verdict) throw new Error(`review add requires --verdict (${REVIEW_VERDICTS.join('|')})`);
+  if (!REVIEW_TIERS.includes(options.tier)) {
+    throw new Error(`unknown tier: ${options.tier} (expected ${REVIEW_TIERS.join('|')})`);
+  }
+  if (!REVIEW_VERDICTS.includes(options.verdict)) {
+    throw new Error(`unknown verdict: ${options.verdict} (expected ${REVIEW_VERDICTS.join('|')})`);
+  }
+  // A review names a runnable: the record is keyed by the runnable's model key,
+  // so an id nothing can run would never be routed and never count.
+  const { runnablesPath } = resolvePaths({});
+  const runnables = loadRunnables(runnablesPath);
+  if (!runnables.some((runnable) => runnable.id === options.model)) {
+    throw new Error(`unknown model: ${options.model} (not a runnable; see ${runnablesPath})`);
+  }
+  const { addReview } = require('../../queue/db.js');
+  const db = openQueueDb(global.db);
+  try {
+    const review = addReview(db, {
+      model: options.model,
+      tier: options.tier,
+      verdict: options.verdict,
+      taskId: options.task ?? null,
+      note: options.note ?? null,
+      reviewer: options.reviewer ?? null,
+    });
+    if (options.json) {
+      print({ status: 'recorded', review }, true);
+    } else {
+      process.stdout.write(`recorded review ${review.id}: ${review.model} ${review.tier} ${review.verdict}\n`);
+    }
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
+function commandReviewList(global, options) {
+  const reviews = loadReviewsFile(global.db, { model: options.model ?? null });
+  if (options.json) {
+    print(reviews, true);
+    return 0;
+  }
+  if (!reviews.length) {
+    process.stdout.write('no reviews\n');
+    return 0;
+  }
+  for (const review of reviews) {
+    const task = review.task_id ? ` task=${review.task_id}` : '';
+    const note = review.note ? `  ${review.note}` : '';
+    const reviewer = review.reviewer ? ` by ${review.reviewer}` : '';
+    process.stdout.write(
+      `${review.created_at}  ${String(review.model).padEnd(40)} ${review.tier.padEnd(6)} `
+      + `${review.verdict.padEnd(18)} ${review.source}${task}${reviewer}${note}\n`,
+    );
+  }
+  return 0;
+}
+
+function commandReviewStats(global, options) {
+  const { runnablesPath } = resolvePaths({});
+  const stats = trackRecordStats(loadTrackRecordsFile(global.db, { runnablesPath }));
+  if (options.json) {
+    print(stats, true);
+    return 0;
+  }
+  process.stdout.write(`${formatTrackRecordTable(stats, getTrackRecordPolicy())}\n`);
   return 0;
 }
 
@@ -742,6 +854,7 @@ async function main(argv = process.argv.slice(2)) {
   // orchestrator database themselves, import-log opens the target itself).
   if (command === 'home') return commandHome(options);
   if (command === 'paths') return commandPaths(options);
+  if (command === 'review') return commandReview(global, options);
   if (command === 'import-log') return commandImportLog(global, options);
   if (command === 'pick') return commandPick(global, options);
   if (command === 'save-workflow') return commandSaveWorkflow(options);
@@ -775,6 +888,11 @@ async function main(argv = process.argv.slice(2)) {
     throw error;
   }
   await source.start();
+  // Outcome reviews live in the queue this command opened, so --db is
+  // authoritative for every routing decision made below, including the
+  // runner's own 'auto' resolution. A source without a local database (the
+  // orchestrator) routes without records, exactly as it does without health.
+  if (source && source.db) options.trackRecords = loadTrackRecords(source.db);
   try {
     if (command === 'enqueue') {
       print(await source.enqueue(options), options.json);
@@ -906,6 +1024,7 @@ module.exports = {
   buildModelRows,
   formatModelRow,
   formatModelTable,
+  formatTrackRecordTable,
   truncateRepo,
   formatJobBlock,
   formatCost,

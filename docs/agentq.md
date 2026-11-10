@@ -746,6 +746,70 @@ verdict on the options. A caller (a person, or a main assistant reading the MCP
 tools) picks an option and passes its id to `dispatch_task` as `model`; the
 choice is recorded in the task's event trail with the roles that model played.
 
+### Track records
+
+A score says how a model does in general. It says nothing about how it did on
+*this* work, and many cheap subscription models have no score at all, so
+routing rejects them as `unscored`. A **review** closes that gap: the caller (a
+main assistant, or a person) looks at what a model produced and records a
+verdict.
+
+```bash
+agentq review add --model mistral/deepseek-v4-1-flash-1017 --tier medium \
+  --verdict accepted-with-fixes --task <task-id> --note "tests needed a rerun"
+agentq review list --model mistral/deepseek-v4-1-flash-1017
+agentq review stats
+```
+
+`--verdict` is `accepted`, `accepted-with-fixes` or `rejected`; `--tier` is
+`small`, `medium` or `big`. `--task` is optional because the work may not have
+gone through the queue — a model run by hand is still evidence. Over MCP the
+same thing is `review_task { id, verdict, note?, tier? }`: the model is the one
+the task actually ran on (the latest `model-chosen` event, else the task's
+stored model), and the tier is the argument, else the tier recorded at
+dispatch, else `medium`. Only a `succeeded` or `failed` task can be reviewed.
+
+Reviews fold into a **track record** per model key and tier. The key is the
+catalog's own (`runnable.modelKey ?? modelKey(runnable.id)`), so the same model
+on two quota paths shares one record. Verdicts are weighted:
+
+| verdict | weight |
+| --- | --- |
+| `accepted` | 1 |
+| `accepted-with-fixes` | 0.5 |
+| `rejected` | 0 |
+
+Tier inheritance is one-directional: a review at `big` also counts for `medium`
+and `small`, and one at `medium` also counts for `small`. Doing well on harder
+work implies easier work; the reverse does not follow. A `verify_failed`
+path outcome counts as a `rejected` review with source `verify`, but only for a
+task that has no explicit review — the considered verdict always wins. Those
+rows carry no tier, so they count at `medium` (and, by inheritance, `small`).
+
+Each record reports `n`, the counts per verdict, the weighted `rate`, and the
+**Wilson score lower bound at 95%** of that rate (`z = 1.96`). The bound is what
+keeps a small sample honest: 5 of 5 accepted is only ≈0.566, while 10 of 10 is
+≈0.722.
+
+A track record only ever *unlocks* a model, it never reorders one. An entry
+with no intelligence at all becomes eligible for a tier when its record has at
+least `minReviews` reviews and a lower bound of at least `minLowerBound`; its
+intelligence stays unknown (`—` in the table) and it sorts by cost like
+everything else. Both thresholds are overridable in `config/roi.config.json`:
+
+```json
+"trackRecord": { "minReviews": 5, "minLowerBound": 0.7 }
+```
+
+A scored model's order never changes; its record is shown and, when `n > 0`,
+explained in its reasons (`track record 4/5 at big`). `pick` prints the record
+as a `record` column (`5/6`, or `—`), `agentq review stats` prints the full
+table, and the `track_records` MCP tool returns the same rows as JSON.
+
+Reviews live in the queue database (`reviews` table), so they travel with the
+queue. A missing database or a database from before the table existed means no
+records, never an error — routing then behaves exactly as it did before.
+
 ### Path health
 
 Every execution attempt's outcome is recorded per quota path (`path_outcomes`:

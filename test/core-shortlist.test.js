@@ -30,6 +30,7 @@ function choice(id, overrides = {}) {
     costPerMTok: 1,
     costSource: 'roi',
     capacityState: 'available',
+    trackRecord: { n: 6, accepted: 5, withFixes: 1, rejected: 0, rate: 0.9167, lowerBound: 0.6325 },
     headroomPct: 60,
     resetsAt: null,
     observedAt: '2026-11-08T11:00:00Z',
@@ -211,6 +212,7 @@ test('an option carries the RankedChoice fields a caller weighs', () => {
       headroomPct: 42,
       resetsAt: SOON,
       capacityState: 'available',
+    trackRecord: { n: 6, accepted: 5, withFixes: 1, rejected: 0, rate: 0.9167, lowerBound: 0.6325 },
     }),
   ]);
   assert.deepEqual(options[0], {
@@ -230,6 +232,7 @@ test('an option carries the RankedChoice fields a caller weighs', () => {
     headroomPct: 42,
     resetsAt: SOON,
     capacityState: 'available',
+    trackRecord: { n: 6, accepted: 5, withFixes: 1, rejected: 0, rate: 0.9167, lowerBound: 0.6325 },
     reasons: ['intelligence 50.0 >= floor 38'],
   });
 });

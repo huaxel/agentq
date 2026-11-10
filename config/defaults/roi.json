@@ -10,6 +10,10 @@
     "high": 0.6,
     "mid": 0.4
   },
+  "trackRecord": {
+    "minReviews": 5,
+    "minLowerBound": 0.7
+  },
   "partitionMap": {
     "agents": {
       "gdpval": 0.25,

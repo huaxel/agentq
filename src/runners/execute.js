@@ -66,6 +66,7 @@ function resolveAutoModel(storedModel, options = {}) {
     roiConfigPath: options.roiConfigPath,
     config: options.config,
     pathHealth: options.pathHealth,
+    trackRecords: options.trackRecords,
   }).model;
 }
 

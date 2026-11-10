@@ -75,10 +75,12 @@ test('the method defaults carry only method keys', () => {
   const defaults = roiDefaults();
   assert.deepEqual(
     Object.keys(defaults).sort(),
-    ['costBlend', 'lambdaCostAversion', 'partitionMap', 'reconWeights', 'tierThresholds'],
+    ['costBlend', 'lambdaCostAversion', 'partitionMap', 'reconWeights', 'tierThresholds', 'trackRecord'],
   );
   assert.equal(defaults.costBlend.cache, 0.9174);
   assert.equal(defaults.partitionMap.coding.terminalBench, 0.667);
+  // The unlock thresholds for outcome-review track records.
+  assert.deepEqual(defaults.trackRecord, { minReviews: 5, minLowerBound: 0.7 });
 });
 
 test('loadRoiConfig merges the setup over the defaults', () => {

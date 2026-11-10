@@ -623,6 +623,10 @@ function buildDispatchTools(deps) {
         try {
           deps.recordTaskEvent(id, 'model-chosen', {
             model: resolved.model,
+            // The tier the model was chosen for. A later outcome review reads
+            // it back (review_task), so the record lands at the right tier
+            // even when the task row itself carries no tier.
+            tier,
             chosenBy: resolved.chosenBy,
             roles: resolved.roles,
             dataSharing: resolved.dataSharing === true,

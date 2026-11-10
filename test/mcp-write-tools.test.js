@@ -25,6 +25,7 @@ const { createMcpServer } = require('../src/interfaces/mcp/protocol.js');
 const {
   openDb, initSchema, createTask: createRawTask, claimNextTask: claimRawTask,
   completeTask: completeRawTask, getTask: getRawTask, approveTask, listTasks,
+  listTaskEvents, addReview,
 } = require('../src/queue/db.js');
 const { snapshotForIssue } = require('./helpers/pinned-issue.js');
 
@@ -58,7 +59,7 @@ function tool(name, deps) {
  * @param {Record<string, any>} [overrides]
  */
 function fakeDeps(overrides = {}) {
-  const calls = { createTask: [], claimNextTask: [], completeTask: [], captureIssueInput: [], resolveAutoModel: [] };
+  const calls = { createTask: [], claimNextTask: [], completeTask: [], captureIssueInput: [], resolveAutoModel: [], addReview: [] };
   const deps = {
     createTask: (task) => {
       calls.createTask.push(task);
@@ -71,7 +72,12 @@ function fakeDeps(overrides = {}) {
     completeTask: (id, result, options) => {
       calls.completeTask.push({ id, result, options });
     },
-    getTask: () => ({ id: 't1', status: 'succeeded' }),
+    getTask: () => ({ id: 't1', status: 'succeeded', model: 'gpt-5' }),
+    listTaskEvents: () => [],
+    addReview: (review) => {
+      calls.addReview.push(review);
+      return { id: 1, ...review };
+    },
     captureIssueInput: (repo, issue) => {
       calls.captureIssueInput.push({ repo, issue });
       return JSON.parse(JSON.stringify(snapshotForIssue(issue)));
@@ -461,6 +467,8 @@ function realDeps(db) {
     claimNextTask: (options) => claimRawTask(db, options.workerId, options),
     completeTask: (id, result, { claimToken }) => completeRawTask(db, id, result, { claimToken }),
     getTask: (id) => getRawTask(db, id),
+    listTaskEvents: (id) => listTaskEvents(db, id),
+    addReview: (review) => addReview(db, review),
     captureIssueInput: (_repo, issue) => snapshotForIssue(issue),
     resolveAutoModel: () => ({ model: 'gpt-5', provider: 'codex' }),
     pid: PID,
@@ -737,8 +745,8 @@ test('bin/agentq-mcp.js --allow-write exposes the write tools and completes a cl
 
     assert.deepEqual(list.result.tools.map((entry) => entry.name), [
       'capacity_overview', 'list_models', 'recommend_model', 'recommend_for_task', 'path_gaps',
-      'list_tasks', 'get_task', 'dispatch_status',
-      'enqueue_task', 'claim_task', 'complete_task', 'dispatch_task',
+      'track_records', 'list_tasks', 'get_task', 'dispatch_status',
+      'enqueue_task', 'claim_task', 'complete_task', 'review_task', 'dispatch_task',
     ]);
 
     assert.equal(claim.result.isError, undefined, JSON.stringify(claim.result));

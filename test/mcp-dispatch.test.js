@@ -433,7 +433,7 @@ test('dispatch_task records how the model was chosen, with its shortlist roles',
   assert.deepEqual(pinned.calls.events, [{
     taskId: 't1',
     event: 'model-chosen',
-    payload: { model: 'gpt-5', chosenBy: 'pinned', roles: [], dataSharing: false },
+    payload: { model: 'gpt-5', tier: 'medium', chosenBy: 'pinned', roles: [], dataSharing: false },
   }]);
   assert.equal(pinned.calls.recommend.length, 0, 'a pin is not re-routed');
 
@@ -441,28 +441,28 @@ test('dispatch_task records how the model was chosen, with its shortlist roles',
   const caller = fakeDeps();
   tool('dispatch_task', caller.deps).handler({ id: 't1', model: 'unscored-model' });
   assert.deepEqual(caller.calls.events[0].payload, {
-    model: 'unscored-model', chosenBy: 'caller', roles: [], dataSharing: false,
+    model: 'unscored-model', tier: 'medium', chosenBy: 'caller', roles: [], dataSharing: false,
   });
 
   // Caller picks an option from the shortlist: its roles are logged.
   const fromList = fakeDeps({ getTask: () => trustedTask({ model: 'auto' }) });
   tool('dispatch_task', fromList.deps).handler({ id: 't1', model: 'gpt-5' });
   assert.deepEqual(fromList.calls.events[0].payload, {
-    model: 'gpt-5', chosenBy: 'caller', roles: ['cheapest', 'smartest'], dataSharing: false,
+    model: 'gpt-5', tier: 'medium', chosenBy: 'caller', roles: ['cheapest', 'smartest'], dataSharing: false,
   });
 
   // A routing failure never blocks a caller-chosen dispatch.
   const broken = fakeDeps({ recommend: () => { throw new Error('no catalog'); } });
   tool('dispatch_task', broken.deps).handler({ id: 't1', model: 'gpt-5' });
   assert.deepEqual(broken.calls.events[0].payload, {
-    model: 'gpt-5', chosenBy: 'caller', roles: [], dataSharing: false,
+    model: 'gpt-5', tier: 'medium', chosenBy: 'caller', roles: [], dataSharing: false,
   });
 
   // Auto: the routing core decides, and its shortlist says what the model is for.
   const auto = fakeDeps({ getTask: () => trustedTask({ model: 'auto' }) });
   tool('dispatch_task', auto.deps).handler({ id: 't1', tier: 'big' });
   assert.deepEqual(auto.calls.events[0].payload, {
-    model: 'gpt-5', chosenBy: 'auto', roles: ['cheapest', 'smartest'], dataSharing: false,
+    model: 'gpt-5', tier: 'big', chosenBy: 'auto', roles: ['cheapest', 'smartest'], dataSharing: false,
   });
 });
 

@@ -28,6 +28,7 @@ const { loadConfig } = require('../lib/model-picker.js');
 const { homeDataPath } = require('../lib/home.js');
 const { resolveAutoModel: resolveAutoModelFor } = require('../core/auto-model.js');
 const { loadPathHealth } = require('./path-health.js');
+const { loadTrackRecords } = require('./track-records.js');
 const {
   cancelJob,
   EXECUTOR_TIMEOUT_MS,
@@ -554,9 +555,13 @@ class SqliteSource {
     const refused = [];
     let routingError = null;
     const health = loadPathHealth(this.db);
+    // Read once per claim, like health: the resolver runs per candidate, and a
+    // per-candidate queue read would scale with the backlog. A caller that
+    // already read them (the CLI) passes its own map.
+    const trackRecords = options.trackRecords ?? loadTrackRecords(this.db);
     const resolve = (storedModel) => {
       try {
-        return resolveAutoModelFor(storedModel, { ...options, pathHealth: health });
+        return resolveAutoModelFor(storedModel, { ...options, pathHealth: health, trackRecords });
       } catch (error) {
         routingError ??= error;
         throw error; // claimNextTask skips this candidate
@@ -641,6 +646,7 @@ class SqliteSource {
       roiConfigPath: options.roiConfigPath,
       threshold: options.threshold,
       pathHealth: loadPathHealth(this.db),
+      trackRecords: loadTrackRecords(this.db),
     });
     // The quota path is re-attributed only when the model actually changes
     // (same rule as requeue). Keeping the stored provider otherwise preserves
@@ -918,7 +924,11 @@ class SqliteSource {
     if (!completionId) throw new Error(`Cannot retry job #${job.id} without a completion receipt.`);
     // Resolve before touching the queue: a routing failure must not leave the
     // task re-pended with nobody running it.
-    const resolved = resolveAutoModelFor(job.model, { ...options, pathHealth: loadPathHealth(this.db) });
+    const resolved = resolveAutoModelFor(job.model, {
+      ...options,
+      pathHealth: loadPathHealth(this.db),
+      trackRecords: loadTrackRecords(this.db),
+    });
     const task = getTask(this.db, job.id);
     if (!task) return null;
     // Same rule as claimById/requeue: re-attribute the path only when the

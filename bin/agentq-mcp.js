@@ -51,6 +51,11 @@ function taskStore() {
 function pathHealthStore() {
   return require('../src/queue/path-health.js');
 }
+
+/** Track-record composition also loads the queue, so it is lazy for the same reason. */
+function trackRecordStore() {
+  return require('../src/queue/track-records.js');
+}
 const { fetchIssueInputAsync } = require('../src/core/issue-input.js');
 
 const { homeDataPath } = require('../src/lib/home.js');
@@ -82,9 +87,9 @@ Environment:
   AGENTQ_MCP_WRITE=1       Enable the write tools (same as --allow-write)
 
 Read tools: capacity_overview, list_models, recommend_model, recommend_for_task,
-path_gaps, list_tasks, get_task, dispatch_status.
+path_gaps, track_records, list_tasks, get_task, dispatch_status.
 Write tools (only with --allow-write or AGENTQ_MCP_WRITE=1): enqueue_task,
-claim_task, complete_task, dispatch_task.
+claim_task, complete_task, review_task, dispatch_task.
 
 Dispatch boundary (server-side only; dispatch_task takes no such arguments):
   --dispatch-sandbox PATH        Wrap the dispatched executor in this sandbox
@@ -225,9 +230,18 @@ function coreFunction(name) {
  * reads the database a second time.
  */
 function recommendWithHealth(options) {
-  if (options && Object.hasOwn(options, 'pathHealth')) return coreFunction('recommend')(options);
-  const health = pathHealthStore().loadPathHealth(taskDbHandle());
-  return coreFunction('recommend')(health ? { ...options, pathHealth: health } : options);
+  const enriched = { ...options };
+  // Both are read once per call from the same handle, and both are optional:
+  // no database means routing without health and without track records.
+  if (!Object.hasOwn(enriched, 'pathHealth')) {
+    const health = pathHealthStore().loadPathHealth(taskDbHandle());
+    if (health) enriched.pathHealth = health;
+  }
+  if (!Object.hasOwn(enriched, 'trackRecords')) {
+    const records = trackRecordStore().loadTrackRecords(taskDbHandle());
+    if (records) enriched.trackRecords = records;
+  }
+  return coreFunction('recommend')(enriched);
 }
 
 /** The read-only queue handle, or null when there is no database (no health). */
@@ -245,6 +259,7 @@ const deps = {
   getPathGaps: () => coreFunction('getPathGaps')(),
   recommend: recommendWithHealth,
   getPathHealth: () => pathHealthStore().loadPathHealth(taskDbHandle()),
+  getTrackRecords: () => trackRecordStore().loadTrackRecords(taskDbHandle()),
   listTasks: (options) => withTaskDb((db) => taskStore().listTasks(db, options)),
   getTask: (id) => withTaskDb((db) => taskStore().getTask(db, id)),
 };
@@ -267,6 +282,8 @@ const writeDeps = {
   claimNextTask: (options) => withWriteTaskDb((db) => taskStore().claimNextTask(db, options.workerId, options)),
   completeTask: (id, result, { claimToken }) => withWriteTaskDb((db) => taskStore().completeTask(db, id, result, { claimToken })),
   getTask: (id) => withWriteTaskDb((db) => taskStore().getTask(db, id)),
+  listTaskEvents: (id) => withTaskDb((db) => taskStore().listTaskEvents(db, id)),
+  addReview: (review) => withWriteTaskDb((db) => taskStore().addReview(db, review)),
   captureIssueInput,
   resolveAutoModel: (tier) => {
     const recommendation = recommendWithHealth({ tier });

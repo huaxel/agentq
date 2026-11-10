@@ -103,6 +103,25 @@ function configProblems(config, { runnables = [] } = {}) {
     }
   }
 
+  // `trackRecord` tunes when an outcome-review record may unlock an unscored
+  // model (src/core/track-record.js). It is optional; a malformed value would
+  // silently fall back to the constants, so it is reported instead.
+  if (config.trackRecord != null) {
+    const policy = config.trackRecord;
+    if (typeof policy !== 'object' || Array.isArray(policy)) {
+      problems.push('trackRecord: expected an object');
+    } else {
+      if (policy.minReviews != null
+        && !(Number.isInteger(policy.minReviews) && policy.minReviews >= 0)) {
+        problems.push('trackRecord.minReviews: expected a non-negative integer');
+      }
+      if (policy.minLowerBound != null
+        && !(typeof policy.minLowerBound === 'number' && policy.minLowerBound >= 0 && policy.minLowerBound <= 1)) {
+        problems.push('trackRecord.minLowerBound: expected a number between 0 and 1');
+      }
+    }
+  }
+
   // Every reconWeights key must have a matching entry in partitionMap —
   // otherwise that weight is silently ignored by scoring. The reverse is NOT
   // required: benchmarks can contribute to a partition sub-index (agents,

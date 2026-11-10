@@ -11,6 +11,7 @@
 
 const path = require('node:path');
 const { capacityFor } = require('../../core/capacity.js');
+const { recordCell } = require('../../core/track-record.js');
 const { formatCost: formatPrice, formatDollars } = require('../../lib/path-prices.js');
 
 /**
@@ -181,7 +182,12 @@ function formatModelTable({ catalog = [], capacity = null, decision = null, titl
  * `default` is printed by the caller underneath, never as a row: it is what
  * "auto" would pick, not a verdict on the options.
  *
- * @param {Array<{ id: string, path: string, pathName?: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, effectiveCostPerMTok?: number|null, pace?: { state?: string, projectedPct?: number|null }|null, headroomPct: number|null, resetsAt: string|null }>} [options]
+ * The `record` column is the outcome-review track record for the requested
+ * tier (`5/6`), or `—` when there is none. It is informational: only a model
+ * with no intelligence at all can be made eligible by it, and the table says
+ * so through its reasons, not by reordering rows.
+ *
+ * @param {Array<{ id: string, path: string, pathName?: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, effectiveCostPerMTok?: number|null, pace?: { state?: string, projectedPct?: number|null }|null, headroomPct: number|null, resetsAt: string|null, trackRecord?: { n: number, accepted: number, withFixes: number }|null }>} [options]
  * @param {{ title?: string }} [input]
  * @returns {string}
  */
@@ -194,7 +200,7 @@ function formatOptionsTable(options = [], { title = 'options' } = {}) {
   const lines = [
     title,
     '',
-    `  ${'id'.padEnd(44)} ${'path'.padEnd(pathWidth)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'eff $/MTok'.padStart(10)} ${'headroom'.padStart(8)}  pace`,
+    `  ${'id'.padEnd(44)} ${'path'.padEnd(pathWidth)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'eff $/MTok'.padStart(10)} ${'headroom'.padStart(8)} ${'record'.padStart(6)}  pace`,
   ];
   options.forEach((option, index) => {
     const headroom = option.headroomPct == null ? '—' : `${option.headroomPct}%`;
@@ -202,9 +208,40 @@ function formatOptionsTable(options = [], { title = 'options' } = {}) {
     lines.push(
       `  ${String(option.id).padEnd(44)} ${paths[index].padEnd(pathWidth)} ${roles.padEnd(40)} `
       + `${intelligenceCell(option).padStart(5)} ${costCell(option).padStart(7)} ${effectiveCostCell(option).padStart(10)} `
-      + `${headroom.padStart(8)}  ${paceCell(option)}`,
+      + `${headroom.padStart(8)} ${recordCell(option.trackRecord).padStart(6)}  ${paceCell(option)}`,
     );
   });
+  return lines.join('\n');
+}
+
+/**
+ * The track records as a table: one row per (model key, tier).
+ *
+ * `rate` is the weighted acceptance rate (with-fixes counts half), `lower` is
+ * the Wilson 95% bound the unlock thresholds compare against, and `unlock`
+ * says whether this record would make an unscored model at this tier eligible.
+ *
+ * @param {{ count: number, records: Array<{ model: string, tier: string, n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }> }} [stats]
+ * @param {{ minReviews?: number, minLowerBound?: number }} [policy]
+ * @returns {string}
+ */
+function formatTrackRecordTable(stats, { minReviews = 5, minLowerBound = 0.7 } = {}) {
+  const records = stats && Array.isArray(stats.records) ? stats.records : [];
+  if (!records.length) return 'no track records: record one with "agentq review add"';
+  const width = Math.max('model'.length, ...records.map((record) => record.model.length));
+  const lines = [
+    'track records — outcome reviews, weighted (accepted 1, with-fixes 0.5, rejected 0)',
+    '',
+    `  ${'model'.padEnd(width)} ${'tier'.padEnd(6)} ${'n'.padStart(3)} ${'ok'.padStart(4)} ${'fix'.padStart(4)} ${'no'.padStart(3)} ${'rate'.padStart(6)} ${'lower'.padStart(6)}  unlock`,
+  ];
+  for (const record of records) {
+    const unlock = record.n >= minReviews && record.lowerBound >= minLowerBound ? 'yes' : 'no';
+    lines.push(
+      `  ${record.model.padEnd(width)} ${record.tier.padEnd(6)} ${String(record.n).padStart(3)} `
+      + `${String(record.accepted).padStart(4)} ${String(record.withFixes).padStart(4)} ${String(record.rejected).padStart(3)} `
+      + `${record.rate.toFixed(2).padStart(6)} ${record.lowerBound.toFixed(2).padStart(6)}  ${unlock}`,
+    );
+  }
   return lines.join('\n');
 }
 
@@ -293,6 +330,7 @@ module.exports = {
   formatModelTable,
   formatOptionsTable,
   formatGapReport,
+  formatTrackRecordTable,
   effectiveCostCell,
   paceCell,
   pathCell,

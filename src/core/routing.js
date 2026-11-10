@@ -14,10 +14,24 @@
  * real score — the tier floor applies to the estimated value — but every reason
  * it produces says so, so a caller can never mistake it for a measured score.
  * `allowUnscored` still means "no intelligence at all", not "estimated".
+ *
+ * A track record (src/core/track-record.js) is the one thing that can make an
+ * entry with NO intelligence eligible: a model this user's work has repeatedly
+ * accepted is a real choice even without a score. It never changes the order of
+ * scored choices, and it is shown on every choice and option.
  */
 
 const { capacityFor } = require('./capacity.js');
 const { shortlist } = require('./shortlist.js');
+const { modelKey } = require('../lib/model-key.js');
+const {
+  TRACK_RECORD_MIN_LOWER,
+  TRACK_RECORD_MIN_N,
+  eligibilityReason,
+  qualifies,
+  trackRecordFor,
+  trackRecordReason,
+} = require('./track-record.js');
 
 /**
  * genIntel floors per tier. Tunable: these are product judgement, not physics.
@@ -52,6 +66,8 @@ const DEGRADED_REASON_PREFIX = 'path degraded: ';
  * @property {string|null} resetsAt
  * @property {string|null} observedAt
  * @property {string|null} subscriptionState null when the catalog carries no subscription status
+ * @property {{ n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }|null} trackRecord
+ *   Outcome-review record for this model at the requested tier, or null.
  * @property {string[]} reasons
  */
 
@@ -172,9 +188,14 @@ function compareChoices(a, b) {
  *   allowUnscored?: boolean,
  *   excludeDataSharing?: boolean,
  *   pathHealth?: Map<string, { state: 'healthy'|'degraded', consecutive: number, lastFailureAt: string|null, reason: string|null }>|null,
+ *   trackRecords?: Map<string, Map<string, { n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }>>|null,
+ *   trackRecordPolicy?: { minReviews?: number, minLowerBound?: number },
  * }} [args]
  *   `excludeDataSharing` is the private-work switch: a choice whose path price
  *   entry says the provider may retain prompts is rejected outright.
+ *   `trackRecords` is keyed by model key (resolved exactly as the catalog does),
+ *   then tier; `trackRecordPolicy` holds the thresholds that unlock an
+ *   unscored model.
  * @returns {{ choices: RankedChoice[], rejected: RankedChoice[], policy: { floor: number, order: string[] } }}
  */
 function rank({
@@ -186,12 +207,18 @@ function rank({
   allowUnscored = false,
   excludeDataSharing = false,
   pathHealth = null,
+  trackRecords = null,
+  trackRecordPolicy = null,
 } = {}) {
   // Object.hasOwn, not `TIER_FLOORS[tier]`: a tier of 'constructor' or
   // 'toString' would otherwise yield a function floor and silently skip the
   // floor check (every `intelligence < fn` comparison is false).
   const tierFloor = typeof tier === 'string' && Object.hasOwn(TIER_FLOORS, tier) ? TIER_FLOORS[tier] : undefined;
   const floor = numericOrNull(minIntelligence) ?? tierFloor ?? TIER_FLOORS.medium;
+  const recordPolicy = {
+    minReviews: numericOrNull(trackRecordPolicy?.minReviews) ?? TRACK_RECORD_MIN_N,
+    minLowerBound: numericOrNull(trackRecordPolicy?.minLowerBound) ?? TRACK_RECORD_MIN_LOWER,
+  };
 
   /** @type {RankedChoice[]} */
   const choices = [];
@@ -201,6 +228,10 @@ function rank({
   for (const entry of catalog) {
     const cap = capacityFor(capacity, entry.path);
     const intelligence = numericOrNull(entry.intelligence);
+    // The same key the catalog uses to join ROI rows, so one model on two
+    // quota paths shares one record.
+    const key = entry.modelKey ?? modelKey(entry.id);
+    const record = trackRecordFor(trackRecords, key, tier);
     const item = {
       id: entry.id,
       path: entry.path,
@@ -223,6 +254,7 @@ function rank({
       resetsAt: cap.resetsAt,
       observedAt: cap.observedAt,
       subscriptionState: entry.subscription ? entry.subscription.state : null,
+      trackRecord: record,
       reasons: [],
     };
 
@@ -255,15 +287,20 @@ function rank({
       item.reasons.push('data sharing: provider may retain prompts');
     }
 
-    // An entry without a usable intelligence score cannot be floor-checked;
-    // allowUnscored is the only way such an entry becomes eligible, and it
-    // still sorts behind every scored choice (cost is null).
+    // An entry without a usable intelligence score cannot be floor-checked.
+    // A qualifying track record makes it eligible (the intelligence stays
+    // null and is shown as unknown); otherwise allowUnscored is the only way
+    // in, and it still sorts behind every scored choice (cost is null).
+    const unlockedByRecord = intelligence === null && qualifies(record, recordPolicy);
     if (intelligence === null) {
-      if (!allowUnscored) {
+      if (unlockedByRecord) {
+        item.reasons.push(eligibilityReason(record, tier, recordPolicy));
+      } else if (!allowUnscored) {
         rejected.push({ ...item, reasons: ['unscored: no ROI score row'] });
         continue;
+      } else {
+        item.reasons.push('unscored: allowed, intelligence unknown');
       }
-      item.reasons.push('unscored: allowed, intelligence unknown');
     } else if (intelligence < floor) {
       rejected.push({
         ...item,
@@ -283,6 +320,13 @@ function rank({
       if (item.costSource === 'path-price' && typeof entry.costReason === 'string' && entry.costReason) {
         item.reasons.push(entry.costReason);
       }
+    }
+
+    // The record informs: it is shown on every surviving choice, and it never
+    // reorders anything. The eligibility sentence above already carries it for
+    // a model the record unlocked, so it is not repeated.
+    if (record && record.n > 0 && !unlockedByRecord) {
+      item.reasons.push(trackRecordReason(record, tier));
     }
 
     if (cap.state === 'saturated') {

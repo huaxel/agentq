@@ -24,6 +24,7 @@ const { capacityFor, readCapacity } = require('./capacity.js');
 const { buildCalibration } = require('./aa-estimate.js');
 const { pathGaps } = require('./path-gaps.js');
 const { recommend: rankAndRecommend } = require('./routing.js');
+const { trackRecordPolicy } = require('./track-record.js');
 const { mixIndex, parseCsv } = require('./token-mix.js');
 const { agentqHome, loadRoiConfig } = require('../lib/home.js');
 const { coverageProblems } = require('../lib/path-coverage.js');
@@ -55,6 +56,14 @@ const { quotaPathId } = require('../lib/subscriptions.js');
  * @property {Map<string, { state: 'healthy'|'degraded', consecutive: number, lastFailureAt: string|null, reason: string|null }>} [pathHealth]
  *   Per-path infrastructure-failure verdicts (src/core/path-health.js).
  *   Degraded choices sort after every healthy choice but stay eligible.
+ * @property {Map<string, Map<string, any>>|null} [trackRecords]
+ *   Outcome-review records keyed by model key, then tier
+ *   (src/core/track-record.js). Supplied by the interface, exactly like
+ *   `pathHealth`: src/queue/track-records.js reads the queue and a missing
+ *   database or table yields no records rather than an error.
+ * @property {{ minReviews?: number, minLowerBound?: number }} [trackRecordPolicy]
+ *   Thresholds that let a record unlock an unscored model. Defaults to the
+ *   `trackRecord` key of the effective ROI config.
  */
 
 /**
@@ -277,7 +286,33 @@ function recommend(args = {}) {
     allowUnscored: args.allowUnscored,
     excludeDataSharing: args.excludeDataSharing,
     pathHealth: args.pathHealth,
+    trackRecords: args.trackRecords,
+    trackRecordPolicy: args.trackRecordPolicy ?? trackRecordPolicy(loadRoiConfigFor(args)),
   });
+}
+
+/**
+ * The effective ROI config, for the routing policy it carries. A missing setup
+ * is not an error here: the method defaults alone are a valid config, and the
+ * policy falls back to its constants.
+ *
+ * @param {SnapshotOptions} [opts]
+ * @returns {Record<string, any>|null}
+ */
+function loadRoiConfigFor(opts = {}) {
+  const { home, roiConfigPath } = resolvePaths(opts);
+  return roiConfigPath ? readJsonIfExists(roiConfigPath, 'ROI config') : loadRoiConfig({ home });
+}
+
+/**
+ * The thresholds that let a track record unlock an unscored model, read from
+ * the effective config's `trackRecord` key (defaults in config/defaults/roi.json).
+ *
+ * @param {SnapshotOptions} [opts]
+ * @returns {{ minReviews: number, minLowerBound: number }}
+ */
+function getTrackRecordPolicy(opts = {}) {
+  return trackRecordPolicy(loadRoiConfigFor(opts));
 }
 
 /**
@@ -333,6 +368,7 @@ module.exports = {
   getCatalog,
   getCapacity,
   getPathGaps,
+  getTrackRecordPolicy,
   recommend,
   coverageIssues,
 };

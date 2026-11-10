@@ -182,6 +182,9 @@ function toOption(choice, roles) {
     headroomPct: finiteOrNull(choice.headroomPct),
     resetsAt: typeof choice.resetsAt === 'string' ? choice.resetsAt : null,
     capacityState: typeof choice.capacityState === 'string' ? choice.capacityState : 'unknown',
+    // The outcome-review record for the requested tier, or null. Carried
+    // through unchanged: routing owns the lookup, the shortlist only shows it.
+    trackRecord: choice.trackRecord ?? null,
     reasons: Array.isArray(choice.reasons) ? choice.reasons.slice() : [],
   };
 }
@@ -191,7 +194,7 @@ function toOption(choice, roles) {
  *
  * @param {any[]} choices ranked choices from src/core/routing.js `rank()`
  * @param {{ max?: number }} [options]
- * @returns {Array<{ id: string, path: string, pathName: string, roles: string[], intelligence: number|null, intelligenceSource: string|null, costPerMTok: number|null, costSource: string|null, costBasis: import('./catalog.js').CostBasis|null, dataSharing: boolean, effectiveCostPerMTok: number|null, pace: import('./capacity.js').QuotaPace|null, quotaPressure: number|null, headroomPct: number|null, resetsAt: string|null, capacityState: string, reasons: string[] }>}
+ * @returns {Array<{ id: string, path: string, pathName: string, roles: string[], intelligence: number|null, intelligenceSource: string|null, costPerMTok: number|null, costSource: string|null, costBasis: import('./catalog.js').CostBasis|null, dataSharing: boolean, effectiveCostPerMTok: number|null, pace: import('./capacity.js').QuotaPace|null, quotaPressure: number|null, headroomPct: number|null, resetsAt: string|null, capacityState: string, trackRecord: { n: number, accepted: number, withFixes: number, rejected: number, rate: number, lowerBound: number }|null, reasons: string[] }>}
  */
 function shortlist(choices, { max = DEFAULT_MAX } = {}) {
   const ranked = Array.isArray(choices)

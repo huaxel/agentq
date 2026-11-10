@@ -17,6 +17,7 @@ const { SqliteSource } = require('../../queue/sources.js');
 const { getCatalog, getCapacity, recommend } = require('../../core/snapshot.js');
 const { degradedMarkers } = require('../../core/routing.js');
 const { loadPathHealth } = require('../../queue/path-health.js');
+const { loadTrackRecords } = require('../../queue/track-records.js');
 const { DEFAULT_TIER, resolveAutoModel, summarizeRejections } = require('../../core/auto-model.js');
 const { isSqliteBusy } = require('../../queue/db-helpers.js');
 const { listRepos, listIssues, listPrs, listMilestones, groupIssuesByMilestone, DEFAULT_CLONE_ROOT } = require('../../runners/gh.js');
@@ -118,7 +119,7 @@ async function doEnqueue(rl, source) {
   if (model === 'auto') {
     // Preview only: the job stores 'auto' and resolves at claim time.
     try {
-      note += ` (auto → ${resolveAutoModel('auto', { tier: DEFAULT_TIER, pathHealth: loadPathHealth(source && source.db) }).model})`;
+      note += ` (auto → ${resolveAutoModel('auto', { tier: DEFAULT_TIER, pathHealth: loadPathHealth(source && source.db), trackRecords: loadTrackRecords(source && source.db) }).model})`;
     } catch (err) {
       note += `\n  ⚠ ${err.message}`;
     }
@@ -261,7 +262,11 @@ async function chooseModel(rl, source = null) {
 
   const catalog = getCatalog();
   const capacity = new Map(getCapacity().map(entry => [entry.path, entry]));
-  const decision = recommend({ tier: DEFAULT_TIER, pathHealth: loadPathHealth(source && source.db) });
+  const decision = recommend({
+    tier: DEFAULT_TIER,
+    pathHealth: loadPathHealth(source && source.db),
+    trackRecords: loadTrackRecords(source && source.db),
+  });
   const rows = buildModelRows({ catalog, capacity, decision });
 
   const julesRow = {
@@ -491,7 +496,11 @@ async function openPr(rl, job) {
 }
 
 function doPick(source = null) {
-  const decision = recommend({ tier: DEFAULT_TIER, pathHealth: loadPathHealth(source && source.db) });
+  const decision = recommend({
+    tier: DEFAULT_TIER,
+    pathHealth: loadPathHealth(source && source.db),
+    trackRecords: loadTrackRecords(source && source.db),
+  });
   for (const marker of degradedMarkers(decision.choices)) console.log(`  degraded: ${marker.path} (${marker.reason})`);
   if (decision.default) {
     console.log(`auto would pick: ${decision.default.id} (${decision.default.path}, tier ${DEFAULT_TIER})`);

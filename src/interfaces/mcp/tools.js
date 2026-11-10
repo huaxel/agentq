@@ -25,6 +25,7 @@ const {
   shapeTask,
   capacityFields,
 } = require('./shape.js');
+const { trackRecordStats } = require('../../core/track-record.js');
 
 /**
  * Optional injected health: deps.getPathHealth() returns a
@@ -455,6 +456,27 @@ function buildReadTools(deps) {
         const report = deps.getPathGaps();
         if (!report || typeof report !== 'object') throw new Error('routing core returned no path gap report');
         return report;
+      },
+    },
+    {
+      name: 'track_records',
+      description:
+        'Read-only outcome-review track records, one row per (model key, tier). A review is a '
+        + 'caller\'s verdict on what a model produced (accepted, accepted-with-fixes, rejected); '
+        + 'accepted-with-fixes counts half, and a review at a harder tier also counts for the '
+        + 'easier ones. `rate` is the weighted acceptance rate and `lowerBound` its Wilson 95% '
+        + 'lower bound. A record with enough reviews and a high enough bound can make a model '
+        + 'with no intelligence score eligible; otherwise it only informs. Same output as '
+        + '"agentq review stats".',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
+      handler(args) {
+        assertKnownArgs(args, []);
+        if (typeof deps.getTrackRecords !== 'function') {
+          throw new Error('track records are unavailable: the server does not expose getTrackRecords');
+        }
+        const records = deps.getTrackRecords();
+        return trackRecordStats(records instanceof Map ? records : null);
       },
     },
     {

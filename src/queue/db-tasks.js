@@ -12,6 +12,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { nowIso, uuidv4, json, parseJson } = require('./db-helpers.js');
 const { normalizeUsage } = require('../lib/usage-normalize.js');
 const { validateIssueInput, issueInputFromPrompt } = require('../core/issue-input.js');
+const { REVIEW_SOURCES, REVIEW_TIERS, REVIEW_VERDICTS } = require('../core/track-record.js');
 const {
   getRateLimits,
   acquireRateLimitLeaseWithinTx,
@@ -140,6 +141,28 @@ CREATE INDEX IF NOT EXISTS idx_path_outcomes_path_created ON path_outcomes(path,
 -- The health window read and the retention prune both filter on created_at
 -- alone, so the (path, created_at) index does not serve them.
 CREATE INDEX IF NOT EXISTS idx_path_outcomes_created ON path_outcomes(created_at);
+
+-- One row per outcome review: what a caller (a main assistant or a person)
+-- thought of what a model produced. model is the runnable id the work ran
+-- on; task_id is nullable because the work may not have gone through the
+-- queue. tier is small|medium|big, verdict is accepted|accepted-with-fixes|
+-- rejected. source is 'review' for a considered verdict; a failed
+-- verification is folded in from path_outcomes (source 'verify'), never
+-- written here. Routing folds these into per-(model key, tier) track records
+-- (src/core/track-record.js).
+CREATE TABLE IF NOT EXISTS reviews (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id     TEXT,
+  model       TEXT NOT NULL,
+  tier        TEXT NOT NULL,
+  verdict     TEXT NOT NULL,
+  note        TEXT,
+  reviewer    TEXT,
+  source      TEXT NOT NULL DEFAULT 'review',
+  created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_model_tier ON reviews(model, tier);
 
 CREATE TABLE IF NOT EXISTS jules_sessions (
   id              TEXT PRIMARY KEY,
@@ -1644,6 +1667,83 @@ function getPathOutcomes(db, { windowMs = PATH_OUTCOME_WINDOW_MS, now = Date.now
   ).all(cutoff);
 }
 
+/**
+ * Record one outcome review.
+ *
+ * The enums are validated here, not by the caller: a row with an unknown
+ * verdict would silently disappear from every track record, and a row with an
+ * unknown tier would never be counted at all.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{ model: string, tier: string, verdict: string, taskId?: string|number|null, note?: string|null, reviewer?: string|null, source?: string }} review
+ * @returns {{ id: number, task_id: string|null, model: string, tier: string, verdict: string, note: string|null, reviewer: string|null, source: string, created_at: string }}
+ */
+function addReview(db, { model, tier, verdict, taskId = null, note = null, reviewer = null, source = 'review' }) {
+  if (typeof model !== 'string' || !model.trim()) throw new Error('addReview requires a model');
+  if (!REVIEW_TIERS.includes(tier)) {
+    throw new Error(`addReview: unknown tier ${String(tier)} (expected ${REVIEW_TIERS.join('|')})`);
+  }
+  if (!REVIEW_VERDICTS.includes(verdict)) {
+    throw new Error(`addReview: unknown verdict ${String(verdict)} (expected ${REVIEW_VERDICTS.join('|')})`);
+  }
+  if (!REVIEW_SOURCES.includes(source)) {
+    throw new Error(`addReview: unknown source ${String(source)} (expected ${REVIEW_SOURCES.join('|')})`);
+  }
+  const createdAt = nowIso();
+  const inserted = db.prepare(`
+    INSERT INTO reviews (task_id, model, tier, verdict, note, reviewer, source, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    taskId == null || taskId === '' ? null : String(taskId),
+    model.trim(),
+    tier,
+    verdict,
+    note == null || note === '' ? null : String(note),
+    reviewer == null || reviewer === '' ? null : String(reviewer),
+    source,
+    createdAt,
+  );
+  return db.prepare('SELECT * FROM reviews WHERE id = ?').get(inserted.lastInsertRowid);
+}
+
+/**
+ * Review rows, newest first, optionally for one model and/or since a time.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{ model?: string|null, since?: string|number|Date|null }} [opts]
+ * @returns {Array<{ id: number, task_id: string|null, model: string, tier: string, verdict: string, note: string|null, reviewer: string|null, source: string, created_at: string }>}
+ */
+function listReviews(db, { model = null, since = null } = {}) {
+  const clauses = [];
+  const params = [];
+  if (typeof model === 'string' && model) {
+    clauses.push('model = ?');
+    params.push(model);
+  }
+  if (since != null && since !== '') {
+    const iso = since instanceof Date ? since.toISOString() : String(since);
+    clauses.push('created_at >= ?');
+    params.push(iso);
+  }
+  const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+  return db.prepare(`SELECT * FROM reviews${where} ORDER BY created_at DESC, id DESC`).all(...params);
+}
+
+/**
+ * Every `verify_failed` outcome, oldest first, for the track-record fold.
+ *
+ * Unlike the one-hour health window, a track record is history: the rows are
+ * bounded by the 7-day retention prune, not by a read window.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @returns {Array<{ model: string|null, task_id: string|null, outcome: string, created_at: string }>}
+ */
+function getVerifyFailures(db) {
+  return db.prepare(
+    "SELECT model, task_id, outcome, created_at FROM path_outcomes WHERE outcome = 'verify_failed' ORDER BY created_at ASC, id ASC",
+  ).all();
+}
+
 function getUsageByProvider(db, provider, days = 7) {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   return db.prepare(
@@ -1715,6 +1815,11 @@ module.exports = {
   getTotalUsage,
   recordPathOutcome,
   getPathOutcomes,
+  getVerifyFailures,
+  addReview,
+  listReviews,
+  REVIEW_TIERS,
+  REVIEW_VERDICTS,
   PATH_OUTCOMES,
   PATH_OUTCOME_RETENTION_MS,
   PATH_OUTCOME_WINDOW_MS,
