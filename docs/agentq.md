@@ -543,7 +543,10 @@ Coverage and runnables are different questions. `paths[].models` says "this
 subscription offers this model" — a list of model keys (normalized with
 `src/lib/model-key.js`), or `["*"]` for a metered pay-per-token path that serves
 whatever the registry lists; a missing or empty list covers nothing. A runnable
-says "I have wired this model for dispatch on this path". Scoring needs
+says "I have wired this model for dispatch on this path". A runnable's path is a
+quota path id, so coverage is the union over every config entry that funds it
+through `sourcePath` — a newer plan for the same quota path covers what it
+serves, even when an older entry's model list is stale. Scoring needs
 coverage, so a model can be scored without a runnable, but a runnable whose
 path does not cover its `modelKey` is a setup mistake: `npm run verify` fails
 with `runnable <id>: path <path> does not cover <modelKey>`, and `agentq pick`
@@ -561,15 +564,39 @@ Explicit model ids bypass routing entirely.
 `--check MODEL` reports a model's capacity entry and eligibility; `--all` lists
 every tier. Both read the same snapshot the queue uses.
 
+### Quota windows
+
+`config.paths[].quotaWindows` says how a path's windows combine into one
+headroom figure, and it defaults to `"all"`: every window binds, so a path's
+headroom is the smallest headroom over the windows that have not reset. That is
+the safe reading, because most providers enforce every limit at once — Claude
+Max has a 5-hour and a weekly limit, Go has 5-hour, weekly and monthly ones —
+and any exhausted window blocks the path. Taking the best window would report a
+path as available whenever its shortest window had room, which fails open.
+
+Use `"any"` when the windows really are alternatives: separate sub-accounts, or
+model groups, where using up one leaves the others usable. Then headroom is the
+largest, and the path stays available while any window has room. A window past
+its reset counts as 100% headroom under either mode, and a path with no windows
+reports 100%. Under `"all"` a saturated path's reason names the binding window,
+for example `headroom below threshold (weekly: 0% left)`.
+
+A window may also carry `period`, a provider-declared duration string parsed
+with the label rules below (`monthly`, `5h`, …). It outranks the label, which
+matters when the label names no length: Mistral's budget windows are labelled
+`Month` and `Vibe`, and the fetcher marks both `period: "monthly"` so pace can
+project them.
+
 ### Quota pace
 
 A subscription path's cost is not flat: it depends on how fast the window is
 being consumed. Each window's duration comes from `windowMinutes` when it is a
-positive number, otherwise from its label (`5h`, `5-hour`, `daily`, `weekly`,
-`monthly`, `<n>m|h|d`, case-insensitive). A parenthetical qualifier is ignored,
-so `5-hour (gosingle)` is a 5-hour window, and a label such as `requests`,
-`concurrency` or `total` describes no duration. With `elapsedPct` the fraction
-of the window already gone and `usedPercent` the quota consumed,
+positive number, then from `period`, otherwise from its label (`5h`, `5-hour`,
+`daily`, `weekly`, `monthly`, `<n>m|h|d`, case-insensitive). A parenthetical
+qualifier is ignored, so `5-hour (gosingle)` is a 5-hour window, and a label
+such as `requests`, `concurrency` or `total` describes no duration. With
+`elapsedPct` the fraction of the window already gone and `usedPercent` the
+quota consumed,
 `projectedPct = usedPercent / (elapsedPct / 100)` extrapolates linearly to the
 reset. It is null before 5% of the window has elapsed, where extrapolation is
 noise. The binding window is the one with the highest projection (the earliest

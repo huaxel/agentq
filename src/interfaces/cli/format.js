@@ -104,6 +104,27 @@ function paceCell(entry) {
   return `${pace.state} ${Math.round(pace.projectedPct)}%`;
 }
 
+/** Longest subscription name the path column shows before it is elided. */
+const PATH_NAME_MAX = 24;
+
+/**
+ * The path column of the options table: the funding subscription's name, with
+ * the quota path id in brackets when the two differ (`Claude Pro (claudemax)`).
+ * The name is elided to 24 characters so one long subscription cannot push the
+ * rest of the row off the screen; the id is never elided, because it is what a
+ * caller passes back to dispatch.
+ *
+ * @param {{ path?: string, pathName?: string }} option
+ * @returns {string}
+ */
+function pathCell(option) {
+  const id = typeof option?.path === 'string' ? option.path : '';
+  const raw = typeof option?.pathName === 'string' && option.pathName ? option.pathName : id;
+  if (!raw || raw === id) return id || '—';
+  const name = raw.length > PATH_NAME_MAX ? `${raw.slice(0, PATH_NAME_MAX - 1)}…` : raw;
+  return `${name} (${id})`;
+}
+
 /**
  * @param {ReturnType<typeof buildModelRows>[number]} row
  * @param {number|string} index
@@ -145,25 +166,30 @@ function formatModelTable({ catalog = [], capacity = null, decision = null, titl
  * `default` is printed by the caller underneath, never as a row: it is what
  * "auto" would pick, not a verdict on the options.
  *
- * @param {Array<{ id: string, path: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, effectiveCostPerMTok?: number|null, pace?: { state?: string, projectedPct?: number|null }|null, headroomPct: number|null, resetsAt: string|null }>} [options]
+ * @param {Array<{ id: string, path: string, pathName?: string, roles: string[], intelligence: number|null, intelligenceSource?: string|null, costPerMTok: number|null, costSource?: string|null, effectiveCostPerMTok?: number|null, pace?: { state?: string, projectedPct?: number|null }|null, headroomPct: number|null, resetsAt: string|null }>} [options]
  * @param {{ title?: string }} [input]
  * @returns {string}
  */
 function formatOptionsTable(options = [], { title = 'options' } = {}) {
+  // The path cells vary in length (`go` vs `Claude Pro (claudemax)`), so the
+  // column is sized to the widest one instead of a fixed width that would
+  // misalign every column after it.
+  const paths = options.map((option) => pathCell(option));
+  const pathWidth = Math.max('path'.length, ...paths.map((cell) => cell.length));
   const lines = [
     title,
     '',
-    `  ${'id'.padEnd(44)} ${'path'.padEnd(12)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'eff $/MTok'.padStart(10)} ${'headroom'.padStart(8)}  pace`,
+    `  ${'id'.padEnd(44)} ${'path'.padEnd(pathWidth)} ${'roles'.padEnd(40)} ${'intel'.padStart(5)} ${'$/MTok'.padStart(7)} ${'eff $/MTok'.padStart(10)} ${'headroom'.padStart(8)}  pace`,
   ];
-  for (const option of options) {
+  options.forEach((option, index) => {
     const headroom = option.headroomPct == null ? '—' : `${option.headroomPct}%`;
     const roles = (option.roles || []).join(', ');
     lines.push(
-      `  ${String(option.id).padEnd(44)} ${String(option.path || '—').padEnd(12)} ${roles.padEnd(40)} `
+      `  ${String(option.id).padEnd(44)} ${paths[index].padEnd(pathWidth)} ${roles.padEnd(40)} `
       + `${intelligenceCell(option).padStart(5)} ${costCell(option).padStart(7)} ${effectiveCostCell(option).padStart(10)} `
       + `${headroom.padStart(8)}  ${paceCell(option)}`,
     );
-  }
+  });
   return lines.join('\n');
 }
 
@@ -222,6 +248,7 @@ module.exports = {
   formatOptionsTable,
   effectiveCostCell,
   paceCell,
+  pathCell,
   truncateRepo,
   formatCost,
   formatJobBlock,

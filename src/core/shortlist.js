@@ -165,6 +165,8 @@ function toOption(choice, roles) {
   return {
     id: choice.id,
     path: choice.path,
+    // The name is the catalog's; `path` stays the id the caller dispatches by.
+    pathName: typeof choice.pathName === 'string' && choice.pathName ? choice.pathName : choice.path,
     roles: [...roles].sort((a, b) => roleRank(a) - roleRank(b)),
     intelligence: finiteOrNull(choice.intelligence),
     intelligenceSource: choice.intelligenceSource ?? null,
@@ -185,7 +187,7 @@ function toOption(choice, roles) {
  *
  * @param {any[]} choices ranked choices from src/core/routing.js `rank()`
  * @param {{ max?: number }} [options]
- * @returns {Array<{ id: string, path: string, roles: string[], intelligence: number|null, intelligenceSource: string|null, costPerMTok: number|null, costSource: string|null, effectiveCostPerMTok: number|null, pace: import('./capacity.js').QuotaPace|null, quotaPressure: number|null, headroomPct: number|null, resetsAt: string|null, capacityState: string, reasons: string[] }>}
+ * @returns {Array<{ id: string, path: string, pathName: string, roles: string[], intelligence: number|null, intelligenceSource: string|null, costPerMTok: number|null, costSource: string|null, effectiveCostPerMTok: number|null, pace: import('./capacity.js').QuotaPace|null, quotaPressure: number|null, headroomPct: number|null, resetsAt: string|null, capacityState: string, reasons: string[] }>}
  */
 function shortlist(choices, { max = DEFAULT_MAX } = {}) {
   const ranked = Array.isArray(choices)

@@ -57,21 +57,92 @@ test('a fresh window reports headroom, reset time, and observation time', () => 
   assert.equal(entry.quotaPressure, 0.25);
 });
 
-test('path headroom is the best window, so one full window does not saturate', () => {
-  const capacity = readCapacity(
-    snapshot({
-      go: {
-        updatedAt: FRESH,
-        windows: [
-          { label: 'monthly (sub-1)', usedPercent: 100, resetsAt: FUTURE },
-          { label: '5-hour (sub-2)', usedPercent: 0, resetsAt: FUTURE },
-        ],
-      },
-    }),
-    { now: NOW },
+/* ───── window combine ───── */
+
+/** A path whose 5-hour window is roomy and whose weekly window is nearly spent. */
+function bindingPath() {
+  return snapshot({
+    go: {
+      updatedAt: FRESH,
+      windows: [
+        { label: '5h', usedPercent: 10, resetsAt: FUTURE },
+        { label: 'weekly', usedPercent: 95, resetsAt: FUTURE },
+      ],
+    },
+  });
+}
+
+test('by default every window binds, so the weakest one sets headroom', () => {
+  const entry = readCapacity(bindingPath(), { now: NOW }).get('go');
+  assert.equal(entry.headroomPct, 5);
+  assert.equal(entry.state, 'saturated');
+  assert.equal(entry.reason, 'headroom below threshold (weekly: 5% left)');
+});
+
+test('quotaWindows "any" keeps the failover reading', () => {
+  const entry = readCapacity(bindingPath(), { now: NOW, windowCombine: { go: 'any' } }).get('go');
+  assert.equal(entry.headroomPct, 90);
+  assert.equal(entry.state, 'available');
+  assert.equal(entry.reason, null);
+});
+
+test('a Map works as well as a plain object for windowCombine', () => {
+  const entry = readCapacity(bindingPath(), { now: NOW, windowCombine: new Map([['go', 'any']]) }).get('go');
+  assert.equal(entry.headroomPct, 90);
+});
+
+test('an unlisted path uses "all" even when other paths say "any"', () => {
+  const capacity = readCapacity(bindingPath(), { now: NOW, windowCombine: { cursor: 'any' } });
+  assert.equal(capacity.get('go').headroomPct, 5);
+  assert.equal(capacity.get('go').state, 'saturated');
+});
+
+test('a window that already reset does not drag the minimum down, under either mode', () => {
+  const quota = snapshot({
+    go: {
+      updatedAt: FRESH,
+      windows: [
+        { label: 'weekly', usedPercent: 100, resetsAt: new Date(NOW - 1000).toISOString() },
+        { label: '5h', usedPercent: 10, resetsAt: FUTURE },
+      ],
+    },
+  });
+  const all = readCapacity(quota, { now: NOW }).get('go');
+  assert.equal(all.headroomPct, 90, 'the reset window counts as 100%, not 0%');
+  assert.equal(all.state, 'available');
+
+  const any = readCapacity(quota, { now: NOW, windowCombine: { go: 'any' } }).get('go');
+  assert.equal(any.headroomPct, 100);
+  assert.equal(any.state, 'available');
+});
+
+test('one full window saturates under "all" and not under "any"', () => {
+  const quota = snapshot({
+    go: {
+      updatedAt: FRESH,
+      windows: [
+        { label: 'monthly (sub-1)', usedPercent: 100, resetsAt: FUTURE },
+        { label: '5-hour (sub-2)', usedPercent: 0, resetsAt: FUTURE },
+      ],
+    },
+  });
+  const all = readCapacity(quota, { now: NOW }).get('go');
+  assert.equal(all.headroomPct, 0);
+  assert.equal(all.state, 'saturated');
+  assert.equal(all.reason, 'headroom below threshold (monthly (sub-1): 0% left)');
+
+  const any = readCapacity(quota, { now: NOW, windowCombine: { go: 'any' } }).get('go');
+  assert.equal(any.headroomPct, 100);
+  assert.equal(any.state, 'available');
+});
+
+test('a saturated reason names the binding window only under "all"', () => {
+  const quota = snapshot({ cursor: { updatedAt: FRESH, windows: [{ label: 'total', usedPercent: 100, resetsAt: FUTURE }] } });
+  assert.equal(readCapacity(quota, { now: NOW }).get('cursor').reason, 'headroom below threshold (total: 0% left)');
+  assert.equal(
+    readCapacity(quota, { now: NOW, windowCombine: { cursor: 'any' } }).get('cursor').reason,
+    'headroom below threshold',
   );
-  assert.equal(capacity.get('go').headroomPct, 100);
-  assert.equal(capacity.get('go').state, 'available');
 });
 
 test('a fully used path is saturated', () => {
@@ -81,7 +152,7 @@ test('a fully used path is saturated', () => {
   );
   assert.equal(capacity.get('cursor').state, 'saturated');
   assert.equal(capacity.get('cursor').headroomPct, 0);
-  assert.equal(capacity.get('cursor').reason, 'headroom below threshold');
+  assert.match(capacity.get('cursor').reason, /^headroom below threshold/);
 });
 
 test('the threshold keeps usedPercent below it for a path to count as available', () => {
@@ -265,6 +336,24 @@ test('windowMinutes wins over the label, and a parenthetical is ignored', () => 
   assert.equal(windowDurationMs({ label: 'weekly', windowMinutes: 60 }), HOUR);
   assert.equal(windowDurationMs({ label: '5-hour (gosingle)' }), 5 * HOUR);
   assert.equal(windowDurationMs({ label: 'total', windowMinutes: 90 }), 90 * MINUTE);
+});
+
+test('period outranks the label and sits below windowMinutes', () => {
+  const marchFirst = '2026-03-01T00:00:00Z';
+  assert.equal(windowDurationMs({ label: 'weekly', period: 'monthly', resetsAt: marchFirst }), 28 * DAY);
+  assert.equal(windowDurationMs({ label: 'weekly', period: '5h' }), 5 * HOUR);
+  assert.equal(windowDurationMs({ label: 'weekly', period: 'monthly', windowMinutes: 60, resetsAt: marchFirst }), HOUR);
+  // A period that names no duration falls through to the label.
+  assert.equal(windowDurationMs({ label: 'weekly', period: 'billing' }), 7 * DAY);
+  assert.equal(windowDurationMs({ label: 'total', period: 'billing' }), null);
+});
+
+test('a Vibe window with period monthly gets pace', () => {
+  const entry = paceOf([windowAt('Vibe', 30 * DAY, 50, 30, { period: 'monthly' })]);
+  assert.ok(entry.pace !== null, 'the label alone names no duration');
+  assert.equal(entry.pace.window, 'Vibe');
+  assert.equal(entry.pace.usedPct, 30);
+  assert.equal(windowDurationMs({ label: 'Vibe' }), null);
 });
 
 test('a label that describes no duration gives none', () => {

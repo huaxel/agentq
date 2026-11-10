@@ -13,6 +13,7 @@ const {
   formatModelTable,
   formatOptionsTable,
   paceCell,
+  pathCell,
 } = require('../src/interfaces/cli/format.js');
 
 const CAPACITY = new Map([['go', { path: 'go', state: 'available', headroomPct: 90, resetsAt: null, observedAt: null, stale: false, reason: null }]]);
@@ -79,4 +80,37 @@ test('the options table shows pace-adjusted cost and pace instead of resets', ()
   assert.doesNotMatch(table, /resets/);
   assert.equal(paceCell({ pace: null }), '—');
   assert.equal(effectiveCostCell({ effectiveCostPerMTok: null }), '—');
+});
+
+test('the path column shows the subscription name with the id in brackets', () => {
+  assert.equal(pathCell({ path: 'claudemax', pathName: 'Claude Pro' }), 'Claude Pro (claudemax)');
+  assert.equal(pathCell({ path: 'go', pathName: 'go' }), 'go', 'an id that is its own name is shown once');
+  assert.equal(pathCell({ path: 'go' }), 'go', 'no name falls back to the id');
+  assert.equal(pathCell({ path: '' }), '—');
+
+  const table = formatOptionsTable([
+    {
+      id: 'a', path: 'claudemax', pathName: 'Claude Pro', roles: ['cheapest'], intelligence: 50,
+      costPerMTok: 1, costSource: 'roi', effectiveCostPerMTok: 0.25,
+      pace: null, headroomPct: 90, resetsAt: null,
+    },
+    {
+      id: 'b', path: 'go', roles: ['alternative'], intelligence: 40,
+      costPerMTok: 0.5, costSource: 'roi', effectiveCostPerMTok: 0.5,
+      pace: null, headroomPct: 100, resetsAt: null,
+    },
+  ]);
+  assert.match(table, /Claude Pro \(claudemax\)/);
+  // The column is sized to the widest cell, so the rows stay aligned.
+  const rows = table.split('\n').slice(2);
+  assert.equal(rows[0].indexOf('cheapest'), rows[1].indexOf('alternative'));
+});
+
+test('a long subscription name is elided to 24 characters', () => {
+  const long = 'An Extremely Long Subscription Name That Would Push The Row'; // 59 chars
+  const cell = pathCell({ path: 'codex', pathName: long });
+  const name = cell.slice(0, cell.indexOf(' (codex)'));
+  assert.equal(name.length, 24);
+  assert.equal(name, `${long.slice(0, 23)}…`);
+  assert.match(cell, / \(codex\)$/);
 });

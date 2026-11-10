@@ -98,6 +98,7 @@ test('catalog joins ROI rows by modelKey and leaves unmatched entries unscored',
   assert.deepEqual(catalog[0], {
     id: 'commandcode/deepseek/deepseek-v4-flash',
     path: 'commandcode',
+    pathName: 'commandcode',
     harness: 'pi',
     modelKey: 'deepseek-v4-flash',
     aaIndex: null,
@@ -342,6 +343,42 @@ test('subscription status follows the roi.config paths that fund a quota path', 
     now,
   });
   assert.equal(catalog[0].subscription?.state, 'ended');
+});
+
+test('pathName is the active funding subscription, not the legacy quota path id', () => {
+  const now = Date.parse('2026-11-08T12:00:00Z');
+  const subscriptions = [
+    { id: 'claudemax', name: 'Claude Max', startDate: '20260101', endDate: '20261001' },
+    { id: 'claudepro2', sourcePath: 'claudemax', name: 'Claude Pro', startDate: '20261001' },
+  ];
+  const runnables = [{ id: 'acme/atlas-large', path: 'claudemax', harness: 'pi', modelKey: null }];
+  const [entry] = buildCatalog({ runnables, subscriptions, now });
+  assert.equal(entry.path, 'claudemax', 'the id is still what dispatch and quota use');
+  assert.equal(entry.pathName, 'Claude Pro');
+  assert.equal(entry.subscription.state, 'active');
+});
+
+test('pathName joins several active funders and falls back to the path id', () => {
+  const now = Date.parse('2026-11-08T12:00:00Z');
+  const runnables = [{ id: 'm', path: 'go', harness: 'pi', modelKey: null }];
+  const both = buildCatalog({
+    runnables,
+    now,
+    subscriptions: [
+      { id: 'go', name: 'Orbit Go', startDate: '20260101' },
+      { id: 'gosingle', sourcePath: 'go', name: 'Orbit Go single', startDate: '20260101' },
+    ],
+  });
+  assert.equal(both[0].pathName, 'Orbit Go + Orbit Go single');
+
+  // Nothing active (ended, and nothing at all) leaves the id.
+  const ended = buildCatalog({
+    runnables,
+    now,
+    subscriptions: [{ id: 'go', name: 'Orbit Go', startDate: '20260101', endDate: '20261001' }],
+  });
+  assert.equal(ended[0].pathName, 'go');
+  assert.equal(buildCatalog({ runnables, now })[0].pathName, 'go', 'no subscription list means no name');
 });
 
 test('a registry-pinned aaSlug decides the AA row for a runnable, not its key', () => {

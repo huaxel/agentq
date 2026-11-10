@@ -17,7 +17,7 @@
 const fs = require('node:fs');
 const { modelKey } = require('../lib/model-key.js');
 const { aaListCost } = require('../lib/aa-pricing.js');
-const { subscriptionStatus } = require('../lib/subscriptions.js');
+const { activeSubscriptionNames, subscriptionStatus } = require('../lib/subscriptions.js');
 const {
   ESTIMATE_SOURCE,
   SCORE_SOURCE,
@@ -61,6 +61,7 @@ const defaultRunnablesFile = () => homeConfigPath('runnables.json');
  * @property {number|null} speed
  * @property {boolean} scored True only for a real ROI score (never for an estimate).
  * @property {import('../lib/subscriptions.js').SubscriptionStatus|null} subscription null when no subscription list was supplied
+ * @property {string} pathName Name of the active subscription funding the quota path, else the path id.
  */
 
 /**
@@ -172,6 +173,12 @@ function buildCatalog({
 
   return runnables.map((runnable) => {
     const subscription = Array.isArray(subscriptions) ? subscriptionStatus(subscriptions, runnable.path, now) : null;
+    // The display name belongs here, next to the subscription status it comes
+    // from: routing and the shortlist only carry it through. `path` stays the
+    // quota path id, because dispatch, quota and health are keyed by it.
+    const pathName = Array.isArray(subscriptions)
+      ? activeSubscriptionNames(subscriptions, runnable.path, now).join(' + ') || runnable.path
+      : runnable.path;
     const row = runnable.modelKey ? byKey.get(runnable.modelKey) : undefined;
     const score = row ? finiteOrNull(row.genIntel) : null;
     // The AA lookup key is the declared modelKey, else the runnable id's own
@@ -186,6 +193,7 @@ function buildCatalog({
     const base = {
       id: runnable.id,
       path: runnable.path,
+      pathName,
       harness: runnable.harness,
       modelKey: runnable.modelKey ?? null,
       aaIndex: aa,

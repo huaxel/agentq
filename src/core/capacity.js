@@ -6,8 +6,13 @@
  * Missing or stale data is UNKNOWN, never available. The retired picker helper
  * failed open on missing data, which made the first entry of its ladder always
  * win; routing must not repeat that. Window headroom semantics are otherwise
- * kept: a window past its reset time counts as 100% headroom, and a path is
- * usable when ANY window has room (failover between sub-accounts).
+ * kept: a window past its reset time counts as 100% headroom.
+ *
+ * Windows bind together by default (`quotaWindows: "all"`): a path's headroom
+ * is the smallest headroom over its live windows, because most providers
+ * enforce every window at once — an exhausted weekly limit blocks a path whose
+ * 5-hour window still has room. `quotaWindows: "any"` restores the failover
+ * reading (the largest headroom) for separate sub-accounts or model groups.
  */
 
 const DEFAULT_MAX_AGE_MS = 6 * 3600 * 1000;
@@ -16,6 +21,9 @@ const DEFAULT_THRESHOLD = 85;
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+
+/** How a path's windows combine. `all` binds every window; `any` fails over. */
+const WINDOW_COMBINE_DEFAULT = 'all';
 
 /**
  * @typedef {object} QuotaPace
@@ -76,26 +84,19 @@ function monthDurationMs(resetsAt) {
 }
 
 /**
- * How long a quota window lasts, in ms, or null when the window does not say.
+ * A duration from a duration-ish string (`5h`, `5-hour`, `daily`, `weekly`,
+ * `monthly`, `<n>m|h|d`), case-insensitive and with a parenthetical qualifier
+ * ignored. `requests`, `concurrency` or `total` describe no duration.
  *
- * `windowMinutes` wins when it is a positive number. Otherwise the label is
- * parsed case-insensitively (`5h`, `5-hour`, `daily`, `weekly`, `monthly`,
- * `<n>m|h|d`), with a parenthetical qualifier ignored. Labels such as
- * `requests`, `concurrency` or `total` describe no duration, so they give null.
- *
- * @param {Record<string, any>|null|undefined} window
+ * @param {string} label
+ * @param {unknown} resetsAt used to size a calendar month.
  * @returns {number|null}
  */
-function windowDurationMs(window) {
-  if (!window || typeof window !== 'object') return null;
-  const minutes = window.windowMinutes;
-  if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) return minutes * MINUTE_MS;
-
-  const label = windowLabel(window);
+function durationFromLabel(label, resetsAt) {
   if (!label) return null;
   if (label === 'daily' || label === 'day') return DAY_MS;
   if (label === 'weekly' || label === 'week') return 7 * DAY_MS;
-  if (label === 'monthly' || label === 'month') return monthDurationMs(window.resetsAt);
+  if (label === 'monthly' || label === 'month') return monthDurationMs(resetsAt);
 
   const match = /^(\d+)\s*-?\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/.exec(label);
   if (!match) return null;
@@ -105,6 +106,28 @@ function windowDurationMs(window) {
   if (unit.startsWith('m')) return count * MINUTE_MS;
   if (unit.startsWith('h')) return count * HOUR_MS;
   return count * DAY_MS;
+}
+
+/**
+ * How long a quota window lasts, in ms, or null when the window does not say.
+ *
+ * Precedence: `windowMinutes` when it is a positive number, then `period` (a
+ * provider-declared duration such as `monthly`, which survives a label that
+ * names no length — Mistral's `Month`/`Vibe` budget windows), then the label.
+ *
+ * @param {Record<string, any>|null|undefined} window
+ * @returns {number|null}
+ */
+function windowDurationMs(window) {
+  if (!window || typeof window !== 'object') return null;
+  const minutes = window.windowMinutes;
+  if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) return minutes * MINUTE_MS;
+
+  const period = typeof window.period === 'string' ? window.period.trim().toLowerCase() : '';
+  const fromPeriod = durationFromLabel(period, window.resetsAt);
+  if (fromPeriod !== null) return fromPeriod;
+
+  return durationFromLabel(windowLabel(window), window.resetsAt);
 }
 
 /**
@@ -147,17 +170,43 @@ function windowPace(window, usedPct, resetMs, now) {
 }
 
 /**
+ * A path's window-combine mode. Paths absent from the map use `all`.
+ *
+ * @param {Map<string, string>|Record<string, string>|null|undefined} windowCombine
+ * @param {string} pathId
+ * @returns {'all'|'any'}
+ */
+function combineMode(windowCombine, pathId) {
+  if (!windowCombine) return WINDOW_COMBINE_DEFAULT;
+  const value = windowCombine instanceof Map
+    ? windowCombine.get(pathId)
+    : (Object.hasOwn(windowCombine, pathId) ? windowCombine[pathId] : undefined);
+  return value === 'any' ? 'any' : WINDOW_COMBINE_DEFAULT;
+}
+
+/** A headroom percentage for the reason text: at most one decimal. */
+function formatPct(value) {
+  return String(Math.round(value * 10) / 10);
+}
+
+/**
  * @param {Record<string, any>|null|undefined} quota
- * @param {{ now?: number, maxAgeMs?: number, threshold?: number }} [options]
+ * @param {{ now?: number, maxAgeMs?: number, threshold?: number, windowCombine?: Map<string, string>|Record<string, string> }} [options]
+ *   `windowCombine` maps a path id to `'all'` (every window binds, the default)
+ *   or `'any'` (failover, the largest headroom wins).
  * @returns {Map<string, CapacityEntry>}
  */
-function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, threshold = DEFAULT_THRESHOLD } = {}) {
+function readCapacity(
+  quota,
+  { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, threshold = DEFAULT_THRESHOLD, windowCombine } = {},
+) {
   /** @type {Map<string, CapacityEntry>} */
   const map = new Map();
   const paths = (quota && quota.paths) || {};
   const snapshotMs = toMs(quota && quota.generatedAt);
 
   for (const [pathId, entry] of Object.entries(paths)) {
+    const combineAny = combineMode(windowCombine, pathId) === 'any';
     const windows = Array.isArray(entry && entry.windows)
       ? entry.windows.filter((w) => w && typeof w === 'object')
       : [];
@@ -166,6 +215,8 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
 
     /** @type {number|null} */
     let headroomPct = null;
+    /** @type {string|null} Label of the window that sets the `all` minimum. */
+    let bindingWindow = null;
     let recentResetSinceObservation = false;
     let oldResetSinceObservation = false;
     /** @type {number|null} */
@@ -175,11 +226,29 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
     /** @type {number|null} */
     let paceResetMs = null;
 
+    /**
+     * Fold one window's headroom into the path's. Under `any` the largest wins
+     * (failover); under `all` the smallest wins, and the window that sets it is
+     * remembered so a saturated reason can name it. A reset window contributes
+     * 100, which never lowers an `all` minimum.
+     *
+     * @param {number} headroom
+     * @param {string|null} label
+     */
+    const fold = (headroom, label) => {
+      if (combineAny) {
+        headroomPct = headroomPct === null ? headroom : Math.max(headroomPct, headroom);
+      } else if (headroomPct === null || headroom < headroomPct) {
+        headroomPct = headroom;
+        bindingWindow = label;
+      }
+    };
+
     for (const window of windows) {
       const resetMs = toMs(window.resetsAt);
       if (resetMs !== null && resetMs <= now) {
         // Already reset: fresh headroom regardless of the last observation.
-        headroomPct = headroomPct === null ? 100 : Math.max(headroomPct, 100);
+        fold(100, null);
         // A reset only vouches for a stale observation while it is recent:
         // usage since a long-past reset was never observed.
         if (observedMs === null || resetMs > observedMs) {
@@ -192,8 +261,7 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
         soonestResetMs = resetMs;
       }
       const used = typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent) ? window.usedPercent : 0;
-      const headroom = 100 - used;
-      headroomPct = headroomPct === null ? headroom : Math.max(headroomPct, headroom);
+      fold(100 - used, typeof window.label === 'string' && window.label.trim() ? window.label : null);
 
       // Pace binds to the window with the highest projection: that is the one
       // whose quota is most likely to run out (or go unused) first. A tie goes
@@ -235,7 +303,11 @@ function readCapacity(quota, { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, 
       reason = null;
     } else {
       state = 'saturated';
-      reason = 'headroom below threshold';
+      // Only the reason text changes: under `all` the binding window explains
+      // which limit is holding the path down.
+      reason = !combineAny && bindingWindow !== null
+        ? `headroom below threshold (${bindingWindow}: ${formatPct(headroomPct)}% left)`
+        : 'headroom below threshold';
     }
 
     map.set(pathId, {

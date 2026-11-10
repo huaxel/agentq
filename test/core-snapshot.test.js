@@ -161,6 +161,86 @@ test('getCapacity without a quota snapshot reports every runnable path unknown',
   assert.equal(capacity.every((entry) => entry.state === 'unknown'), true);
 });
 
+/* ───── quotaWindows plumbing ───── */
+
+const TESTDATA_HOME = path.join(__dirname, '..', 'testdata', 'home');
+
+/** A copy of the synthetic fixture home, so a test can edit its config. */
+function copyTestdataHome() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentq-windows-home-'));
+  fs.cpSync(TESTDATA_HOME, root, { recursive: true });
+  return root;
+}
+
+/** Two windows on `go`: a roomy 5-hour one and a nearly spent weekly one. */
+const TWO_WINDOW_QUOTA = {
+  generatedAt: FRESH,
+  paths: {
+    go: {
+      updatedAt: FRESH,
+      windows: [
+        { label: '5h', usedPercent: 10, resetsAt: FUTURE },
+        { label: 'weekly', usedPercent: 95, resetsAt: FUTURE },
+      ],
+    },
+  },
+};
+
+function setGoQuotaWindows(root, quotaWindows) {
+  const file = path.join(root, 'config', 'roi.config.json');
+  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const entry of config.paths) {
+    if (entry.id === 'go') entry.quotaWindows = quotaWindows;
+  }
+  fs.writeFileSync(file, JSON.stringify(config));
+}
+
+/** `go`'s capacity entry from a fixture home carrying TWO_WINDOW_QUOTA. */
+function goCapacity(root) {
+  const quotaPath = path.join(root, 'data', 'quota.json');
+  fs.writeFileSync(quotaPath, JSON.stringify(TWO_WINDOW_QUOTA));
+  return withEnv({ AGENTQ_QUOTA: undefined, AGENTQ_ROI_CONFIG: undefined }, () =>
+    getCapacity({ home: root, quotaPath, now: NOW }).find((entry) => entry.path === 'go'));
+}
+
+test('a config path with quotaWindows "any" reaches readCapacity', () => {
+  const root = copyTestdataHome();
+  setGoQuotaWindows(root, 'any');
+  const entry = goCapacity(root);
+  assert.equal(entry.headroomPct, 90);
+  assert.equal(entry.state, 'available');
+});
+
+test('a config path without quotaWindows binds every window', () => {
+  const root = copyTestdataHome();
+  const entry = goCapacity(root);
+  assert.equal(entry.headroomPct, 5);
+  assert.equal(entry.state, 'saturated');
+  assert.equal(entry.reason, 'headroom below threshold (weekly: 5% left)');
+});
+
+test('quotaWindows follows the quota path id, so a sourcePath alias still applies', () => {
+  const root = copyTestdataHome();
+  const file = path.join(root, 'config', 'roi.config.json');
+  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // A second plan funding the same quota path `go`, declaring the mode; the
+  // original entry keeps the default and must not reset it.
+  config.paths.push({ id: 'go-lite', sourcePath: 'go', type: 'Wallet', fee: 5, quotaWindows: 'any' });
+  fs.writeFileSync(file, JSON.stringify(config));
+  const entry = goCapacity(root);
+  assert.equal(entry.headroomPct, 90);
+  assert.equal(entry.state, 'available');
+});
+
+test('an unreadable config leaves every path on the "all" default', () => {
+  const root = copyTestdataHome();
+  setGoQuotaWindows(root, 'any');
+  fs.writeFileSync(path.join(root, 'config', 'roi.config.json'), '{ not json');
+  const entry = goCapacity(root);
+  assert.equal(entry.headroomPct, 5);
+  assert.equal(entry.state, 'saturated');
+});
+
 test('getCapacity honours the AGENTQ_QUOTA override', () => {
   const root = fixtureRoot({ roi: ROI });
   const quotaFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agentq-quota-')), 'quota.json');

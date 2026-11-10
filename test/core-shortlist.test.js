@@ -192,6 +192,12 @@ test('a degraded choice keeps its degraded reason', () => {
   assert.deepEqual(options[0].reasons, ['intelligence 50.0 >= floor 38', reason]);
 });
 
+test('an option carries the catalog\'s pathName and keeps path as the id', () => {
+  const options = shortlist([choice('a', { path: 'claudemax', pathName: 'Claude Pro' })]);
+  assert.equal(options[0].path, 'claudemax');
+  assert.equal(options[0].pathName, 'Claude Pro');
+});
+
 test('an option carries the RankedChoice fields a caller weighs', () => {
   const options = shortlist([
     choice('a', {
@@ -210,6 +216,7 @@ test('an option carries the RankedChoice fields a caller weighs', () => {
   assert.deepEqual(options[0], {
     id: 'a',
     path: 'codex',
+    pathName: 'codex',
     roles: ['cheapest', 'smartest', 'expiring', 'best-value'],
     intelligence: 53.95,
     intelligenceSource: 'aa-estimate',

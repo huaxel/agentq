@@ -35,6 +35,9 @@ test('mistral allowance windows map onto quota entries', async () => {
   assert.deepEqual(result.windows.map((w) => [w.label, w.usedPercent]), [['Month', 0], ['Vibe', 100]]);
   assert.equal(result.windows[1].resetsAt, null);
   assert.equal(result.windows[1].resetDescription, '22d');
+  // Both windows come from the monthly billing budget, so the period carries
+  // the duration their labels do not name.
+  assert.deepEqual(result.windows.map((w) => w.period), ['monthly', 'monthly']);
 });
 
 test('a fetcher error or an empty allowance is an error, not a window', async () => {

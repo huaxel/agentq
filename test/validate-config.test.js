@@ -44,6 +44,16 @@ test('flags a path entry with an unknown type', () => {
   assert.ok(configProblems(c).some(p => /unknown type/.test(p)));
 });
 
+test('quotaWindows accepts all/any and rejects anything else', () => {
+  const withMode = (quotaWindows) => ({ ...realConfig, paths: [{ id: 'go', type: 'Wallet', fee: 10, quotaWindows }] });
+  assert.deepEqual(configProblems(withMode('all')), []);
+  assert.deepEqual(configProblems(withMode('any')), []);
+  assert.deepEqual(configProblems(withMode(undefined)), [], 'omitting the key is the default');
+  const problems = configProblems(withMode('some'));
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /paths\[0\] \(go\): "quotaWindows" must be "all" or "any"/);
+});
+
 test('flags a missing profile and non-numeric weights', () => {
   const c = { ...realConfig, profiles: { tax: { agents: 'x' } } };
   const problems = configProblems(c);

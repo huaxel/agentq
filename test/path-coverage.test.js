@@ -67,6 +67,25 @@ test('a runnable on a wildcard path, or with no modelKey, is covered', () => {
   assert.deepEqual(coverageProblems(config, { runnables }), []);
 });
 
+test('coverage follows sourcePath, so a newer plan can cover the quota path', () => {
+  // `go` is an ended earlier period with a stale model list; `gosingle` funds
+  // the same quota path with the model the runnable actually runs.
+  const funded = {
+    paths: [
+      { id: 'go', name: 'Orbit Go', type: 'Wallet', fee: 10, models: ['atlas-flash'], endDate: '20260901' },
+      { id: 'gosingle', sourcePath: 'go', name: 'Orbit Go single', type: 'Wallet', fee: 5, models: ['atlas-mini'] },
+    ],
+  };
+  const runnables = [{ id: 'opencode-go/atlas-mini', path: 'go', modelKey: 'atlas-mini' }];
+  assert.deepEqual(coverageProblems(funded, { runnables }), []);
+
+  // Neither entry covers it: the error text is the one it always was.
+  const stale = { paths: [funded.paths[0], { ...funded.paths[1], models: ['atlas-flash'] }] };
+  assert.deepEqual(coverageProblems(stale, { runnables }), [
+    'runnable opencode-go/atlas-mini: path go does not cover atlas-mini',
+  ]);
+});
+
 test('a runnable on a path the config does not declare is not covered', () => {
   const runnables = [{ id: 'x/y', path: 'ghost', modelKey: 'y' }];
   assert.deepEqual(coverageProblems(config, { runnables }), [

@@ -30,6 +30,12 @@ function configProblems(config, { runnables = [] } = {}) {
       if (p && typeof p.type === 'string' && !VALID_TYPES.has(p.type)) {
         problems.push(`paths[${i}] (${p.id}): unknown type "${p.type}" — expected one of ${[...VALID_TYPES].join(', ')}`);
       }
+      // `quotaWindows` decides whether the path's quota windows bind together
+      // (`all`, the default) or fail over (`any`). Anything else would silently
+      // fall back to a default, so it is an error (src/core/capacity.js).
+      if (p && p.quotaWindows != null && p.quotaWindows !== 'all' && p.quotaWindows !== 'any') {
+        problems.push(`paths[${i}] (${p.id}): "quotaWindows" must be "all" or "any"`);
+      }
       // `models` is the path's model coverage (see lib/path-coverage.js). A
       // missing or empty list is legal and means the path covers nothing; a
       // non-array or a non-string entry silently drops coverage, so it fails.

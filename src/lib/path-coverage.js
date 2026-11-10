@@ -21,6 +21,7 @@
  */
 
 const { modelKey } = require('./model-key.js');
+const { fundsQuotaPath } = require('./subscriptions.js');
 
 /** The one wildcard: every model in the registry. */
 const ALL_MODELS = '*';
@@ -74,6 +75,12 @@ function pathLabel(pathEntry) {
  * runnable on a path that is not configured at all is reported the same way —
  * an unknown path covers nothing.
  *
+ * A runnable's `path` is a QUOTA path id, which any config entry can fund
+ * through `sourcePath` (src/lib/subscriptions.js). So coverage is the union
+ * over every entry that funds that path: `gosingle` (sourcePath go) covers a
+ * runnable on `go` even when the older `go` entry's model list is stale, and
+ * an ended plan still declares what it served.
+ *
  * Runnables with a null modelKey carry no registry identity (unscorable by
  * design), so they are skipped.
  *
@@ -82,12 +89,12 @@ function pathLabel(pathEntry) {
  * @returns {string[]} problems (empty when every runnable is covered)
  */
 function coverageProblems(config, { runnables = [] } = {}) {
-  const byId = new Map();
-  for (const entry of config?.paths || []) if (entry?.id) byId.set(entry.id, entry);
+  const entries = (config?.paths || []).filter((entry) => entry && typeof entry.id === 'string');
   const problems = [];
   for (const runnable of runnables || []) {
     if (!runnable || runnable.modelKey == null || runnable.modelKey === '') continue;
-    if (pathCovers(byId.get(runnable.path), runnable.modelKey)) continue;
+    const funding = entries.filter((entry) => fundsQuotaPath(entry, runnable.path));
+    if (funding.some((entry) => pathCovers(entry, runnable.modelKey))) continue;
     problems.push(`runnable ${runnable.id}: path ${runnable.path} does not cover ${runnable.modelKey}`);
   }
   return problems;

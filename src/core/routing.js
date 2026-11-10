@@ -34,7 +34,8 @@ const DEGRADED_REASON_PREFIX = 'path degraded: ';
 /**
  * @typedef {object} RankedChoice
  * @property {string} id
- * @property {string} path
+ * @property {string} path Quota path id; dispatch, quota and health are keyed by it.
+ * @property {string} pathName Display name of the active funding subscription, else `path`.
  * @property {number|null} intelligence Score or estimate; null when unknown.
  * @property {'roi'|'aa-estimate'|null} intelligenceSource
  * @property {number|null} aaIndex Exact AA Intelligence Index behind an estimate.
@@ -197,6 +198,9 @@ function rank({
     const item = {
       id: entry.id,
       path: entry.path,
+      // Computed by the catalog, which owns the subscription status; routing
+      // only carries it, so a hand-built catalog entry still shows its path.
+      pathName: typeof entry.pathName === 'string' && entry.pathName ? entry.pathName : entry.path,
       intelligence,
       intelligenceSource: entry.intelligenceSource ?? null,
       aaIndex: numericOrNull(entry.aaIndex),

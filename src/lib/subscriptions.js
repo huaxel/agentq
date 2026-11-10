@@ -31,6 +31,63 @@ function day8(value) {
 }
 
 /**
+ * The quota path a roi.config entry funds: its `sourcePath` when it declares
+ * one, its `id` otherwise. This is the ONE funding rule: quota.json keys,
+ * `runnables[].path`, coverage and the displayed path name all use it.
+ *
+ * @param {Record<string, any>|null|undefined} pathEntry one `config.paths[]` entry
+ * @returns {string|null} null when the entry names no path at all.
+ */
+function quotaPathId(pathEntry) {
+  const source = typeof pathEntry?.sourcePath === 'string' ? pathEntry.sourcePath.trim() : '';
+  if (source) return source;
+  const id = typeof pathEntry?.id === 'string' ? pathEntry.id : '';
+  return id || null;
+}
+
+/**
+ * True when `pathEntry` funds quota path `pathId`. An entry without a string
+ * `id` funds nothing, so a stray `sourcePath` cannot claim a path.
+ *
+ * @param {Record<string, any>|null|undefined} pathEntry
+ * @param {string} pathId
+ * @returns {boolean}
+ */
+function fundsQuotaPath(pathEntry, pathId) {
+  if (!pathEntry || typeof pathEntry.id !== 'string' || typeof pathId !== 'string' || pathId === '') return false;
+  return quotaPathId(pathEntry) === pathId;
+}
+
+/**
+ * The config entries funding a quota path, in config order.
+ *
+ * @param {Array<Record<string, any>>|null|undefined} subscriptions roi.config.json `paths`
+ * @param {string} pathId
+ * @returns {Array<Record<string, any>>}
+ */
+function fundingEntries(subscriptions, pathId) {
+  return (Array.isArray(subscriptions) ? subscriptions : []).filter((p) => fundsQuotaPath(p, pathId));
+}
+
+/**
+ * True when the entry's subscription dates cover `today` (YYYYMMDD, inclusive).
+ *
+ * @param {Record<string, any>} pathEntry
+ * @param {string} today
+ * @returns {boolean}
+ */
+function isActiveOn(pathEntry, today) {
+  const start = day8(pathEntry.startDate);
+  const end = day8(pathEntry.endDate);
+  return (!start || start <= today) && (!end || end >= today);
+}
+
+/** `YYYYMMDD` in UTC for an injected clock. */
+function currentDay(now) {
+  return new Date(now).toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+/**
  * Status of the subscriptions that fund a quota path. A roi.config path funds
  * quota path P when its `sourcePath` (or, absent that, its `id`) is P, so
  * `codexprolite` (sourcePath codex) keeps the `codex` path alive after the
@@ -44,14 +101,10 @@ function day8(value) {
  * @returns {SubscriptionStatus}
  */
 function subscriptionStatus(subscriptions, pathId, now = Date.now()) {
-  const today = new Date(now).toISOString().slice(0, 10).replace(/-/g, '');
-  const funding = subscriptions.filter((p) => p && typeof p.id === 'string' && (p.sourcePath ?? p.id) === pathId);
+  const today = currentDay(now);
+  const funding = fundingEntries(subscriptions, pathId);
   if (!funding.length) return { state: 'unconfigured', ids: [], endDate: null };
-  const active = funding.filter((p) => {
-    const start = day8(p.startDate);
-    const end = day8(p.endDate);
-    return (!start || start <= today) && (!end || end >= today);
-  });
+  const active = funding.filter((p) => isActiveOn(p, today));
   if (active.length) return { state: 'active', ids: active.map((p) => p.id), endDate: null };
   const upcoming = funding.some((p) => {
     const start = day8(p.startDate);
@@ -65,4 +118,20 @@ function subscriptionStatus(subscriptions, pathId, now = Date.now()) {
   };
 }
 
-module.exports = { day8, subscriptionStatus };
+/**
+ * Display names of the config paths currently funding a quota path, in config
+ * order. Empty when none is active — the caller falls back to the path id.
+ *
+ * @param {Array<Record<string, any>>|null|undefined} subscriptions roi.config.json `paths`
+ * @param {string} pathId
+ * @param {number} [now]
+ * @returns {string[]}
+ */
+function activeSubscriptionNames(subscriptions, pathId, now = Date.now()) {
+  const today = currentDay(now);
+  return fundingEntries(subscriptions, pathId)
+    .filter((p) => isActiveOn(p, today))
+    .map((p) => (typeof p.name === 'string' && p.name.trim() ? p.name.trim() : p.id));
+}
+
+module.exports = { day8, quotaPathId, fundsQuotaPath, activeSubscriptionNames, subscriptionStatus };

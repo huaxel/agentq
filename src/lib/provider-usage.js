@@ -112,6 +112,10 @@ async function fetchXaiQuotaEntry({ getToken = piXaiToken, fetchImpl } = {}) {
  * Requires @juanbenjumea/pi-provider-usage-fetcher >= 0.3.6; an older install
  * reports that instead of inventing a window.
  *
+ * Every window comes from the monthly billing budget, and its label (`Month`,
+ * `Vibe`) does not always name a duration, so `period: 'monthly'` carries the
+ * length for pace (src/core/capacity.js windowDurationMs).
+ *
  * @param {{ load?: () => Promise<Record<string, any>> }} [options]
  */
 async function fetchMistralQuotaEntry({ load = loadUsage } = {}) {
@@ -128,6 +132,7 @@ async function fetchMistralQuotaEntry({ load = loadUsage } = {}) {
       usedPercent: clampPercent(w.usedPercent),
       resetsAt: w.resetsAt || null,
       resetDescription: w.resetDescription || w.resetsIn || null,
+      period: 'monthly',
     })),
     updatedAt: new Date(result.fetchedAt).toISOString(),
   };

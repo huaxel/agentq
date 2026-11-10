@@ -25,6 +25,7 @@ const { buildCalibration } = require('./aa-estimate.js');
 const { recommend: rankAndRecommend } = require('./routing.js');
 const { agentqHome, loadRoiConfig } = require('../lib/home.js');
 const { coverageProblems } = require('../lib/path-coverage.js');
+const { quotaPathId } = require('../lib/subscriptions.js');
 
 /**
  * @typedef {object} SnapshotOptions
@@ -155,6 +156,45 @@ function loadAaEstimates({ roiModels, aaSnapshotPath, registryPath }) {
 }
 
 /**
+ * Per-path window-combine mode from `config.paths[].quotaWindows`.
+ *
+ * The keys are the ids `data/quota.json` is keyed by. The collector writes
+ * `paths[config.providerPathMap[provider]]`, and a config path entry funds that
+ * id through `sourcePath` when it declares one, its `id` otherwise — the shared
+ * funding rule (src/lib/subscriptions.js `quotaPathId`). So the key is
+ * `sourcePath ?? id`, not always `id`.
+ *
+ * Only entries that declare the key are listed; absent means `all`, which is
+ * also what every path gets when the config cannot be read. That keeps an alias
+ * entry (same quota path, no `quotaWindows`) from resetting an explicit `"any"`
+ * declared by the entry that funds the same quota path.
+ *
+ * @param {string|null} roiConfigPath
+ * @param {string} home
+ * @returns {Map<string, 'all'|'any'>}
+ */
+function quotaWindowCombine(roiConfigPath, home) {
+  /** @type {Map<string, 'all'|'any'>} */
+  const combine = new Map();
+  let roiConfig;
+  try {
+    roiConfig = roiConfigPath ? readJsonIfExists(roiConfigPath, 'ROI config') : loadRoiConfig({ home });
+  } catch {
+    // Capacity must still be readable without a setup: `all` is the safe default.
+    return combine;
+  }
+  const paths = roiConfig && Array.isArray(roiConfig.paths) ? roiConfig.paths : [];
+  for (const pathEntry of paths) {
+    if (!pathEntry || typeof pathEntry.id !== 'string') continue;
+    const mode = pathEntry.quotaWindows;
+    if (mode !== 'all' && mode !== 'any') continue;
+    const pathId = quotaPathId(pathEntry);
+    if (pathId !== null && !combine.has(pathId)) combine.set(pathId, mode);
+  }
+  return combine;
+}
+
+/**
  * Capacity keyed by path, including an explicit unknown entry for every
  * runnable path the snapshot does not mention.
  *
@@ -162,9 +202,13 @@ function loadAaEstimates({ roiModels, aaSnapshotPath, registryPath }) {
  * @returns {Map<string, import('./capacity.js').CapacityEntry>}
  */
 function loadCapacity(opts = {}) {
-  const { quotaPath, runnablesPath, now } = resolvePaths(opts);
+  const { home, quotaPath, runnablesPath, roiConfigPath, now } = resolvePaths(opts);
   const quota = readJsonIfExists(quotaPath, 'quota snapshot');
-  const capacity = readCapacity(quota, { now, threshold: opts.threshold });
+  const capacity = readCapacity(quota, {
+    now,
+    threshold: opts.threshold,
+    windowCombine: quotaWindowCombine(roiConfigPath, home),
+  });
   for (const runnable of loadRunnables(runnablesPath)) {
     if (!capacity.has(runnable.path)) capacity.set(runnable.path, capacityFor(capacity, runnable.path));
   }

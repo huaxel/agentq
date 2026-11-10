@@ -124,6 +124,11 @@ means the path covers nothing. The registry holds only facts about a model
 (prices, benchmarks), so adding a subscription is one config entry instead of a
 new column on every registry row.
 
+A runnable's `path` is a quota path id, which a config entry can fund through
+`sourcePath` (a newer plan for the same quota path). Coverage is therefore the
+union over every entry funding that path, so `gosingle` (`sourcePath: "go"`)
+covers a runnable on `go` even when the older `go` entry's model list is stale.
+
 Coverage is not the same as `config/runnables.json`. Coverage says "this path
 offers the model"; a runnable says "I have wired this model for dispatch on this
 path". Scoring needs coverage, so a covered model can be scored without being
@@ -141,6 +146,14 @@ new subscription.
   "models": ["*"]
 }
 ```
+
+Optional `quotaWindows` on a `config.paths[]` entry decides how that path's
+quota windows combine into one headroom figure (see
+[agentq.md](agentq.md#quota-windows)): `"all"` (the default) makes every window
+bind and takes the smallest headroom, which is what a provider enforcing a
+5-hour and a weekly limit at once requires; `"any"` takes the largest, for
+separate sub-accounts or model groups that fail over. Any other value is a
+validation error.
 
 A home that still carries the old per-subscription registry columns (`onLocal`,
 `onGo`, `onCodex`, `onClaudeMax`, `onOpenRouter`, …) and `paths[].availKey` is
